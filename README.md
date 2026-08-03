@@ -4,6 +4,22 @@ A股 打板/短线的**情绪面 + 连板属性博弈**复盘与监控系统。�
 
 ---
 
+## 产出示例
+
+两张图都是系统直接出的图(`?poster=<date>` 海报页 → Playwright 截图),收盘后自动推到飞书。
+
+**每日复盘** —— 情绪 5 指标 + 今日方向(含板块涨幅)+ 明日候选(A+~D 分级与进/弃价位)+ 明日核心矛盾的 if/则 推演:
+
+<img src="screenshots/poster-review.png" alt="每日复盘海报" width="600">
+
+**连板天梯** —— 按板位分档,标注最终封板时间、一字板、`↺` 炸板后回封;划线为昨日连板今日断板(后跟当日涨跌幅):
+
+<img src="screenshots/poster-ladder.png" alt="连板天梯海报" width="820">
+
+> 图中个股仅为系统真实产出的示例,不构成任何投资建议。
+
+---
+
 ## 一、定位与核心思想
 
 普通打板工具给的是"截面事实"(谁涨停、几板、封单多少),但打板真正的决策依赖**情绪判断**:
@@ -65,8 +81,8 @@ daban-review/
 │           ├── CandidatePanel.tsx    # 四风格候选表(评级/仓位/滚动命中率)
 │           ├── ChatDrawer.tsx        # 对话追问(SSE)
 │           └── IntradayDialog.tsx    # 个股分时弹窗(原生 ECharts)
-├── data/                             # SQLite 库、运行数据
-└── screenshots/
+├── data/                             # SQLite 库、运行数据(不入库)
+└── screenshots/                      # README 用的产出示例图
 ```
 
 **分层数据流**:
