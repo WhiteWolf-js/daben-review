@@ -1,0 +1,19 @@
+# 数据/指标层
+akshare>=1.18
+pandas>=2.0
+python-dotenv>=1.0
+
+# agent 层(M2)
+claude-agent-sdk>=0.1.58
+
+# 应用层(M3)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+apscheduler>=3.10
+
+# 盘中监控通知:飞书自建应用 SDK
+lark-oapi>=1.5.0
+
+# 复盘海报出图:截前端 ?poster= 页成 PNG。用 channel="chrome" 复用系统 Chrome,
+# 无需执行 `playwright install`(若部署到无 Chrome 的 Linux 再装 chromium)
+playwright>=1.44

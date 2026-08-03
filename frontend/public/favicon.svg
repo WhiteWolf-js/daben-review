@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="打板情绪复盘">
+  <!-- 连板天梯:三级递增 = 首板→2板→高度板。底色用主题的涨停红(#e5484d),
+       白图红底在亮色和暗色标签栏都跳得出来;暗底方案在暗色浏览器里会糊成一团。 -->
+  <rect width="32" height="32" rx="7" fill="#e5484d" />
+  <g fill="#fff">
+    <rect x="6" y="19" width="5" height="7" rx="1.5" />
+    <rect x="13.5" y="13" width="5" height="13" rx="1.5" />
+    <rect x="21" y="7" width="5" height="19" rx="1.5" />
+  </g>
+</svg>
