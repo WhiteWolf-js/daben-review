@@ -7,9 +7,12 @@ export const fmtSeal = (s?: string) => {
   return t.length >= 4 ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : "";
 };
 
+// 炸板 ≥5 次的回封算烂板:主力借涨停价反复出货,和「炸一次又封回去」差着量级
+const BAD_SEAL_BREAKS = 5;
+
 /**
  * 一格:上=最终封板时间 / 一字板标 / 断板涨跌幅,中=名称(断板划线),下=行业。
- * ↺ = 炸板后回封(封板质量打折);断板 = 昨日连板今日没封住,高度被打掉。
+ * ↺N = 炸板 N 次后回封(封板质量打折,≥5 次标红);断板 = 昨日连板今日没封住,高度被打掉。
  */
 function Cell({
   s,
@@ -21,8 +24,12 @@ function Cell({
   onPick?: (s: LadderCell) => void;
 }) {
   const up = s.pct >= 0;
-  const rebuy = (s.break_times ?? 0) > 0;
+  const breaks = s.break_times ?? 0;
+  const rebuy = breaks > 0;
+  const badSeal = breaks >= BAD_SEAL_BREAKS;
   const px = (n: number) => Math.round(n * scale);
+  // 炸一次只标 ↺,炸多次把次数打出来 —— 26 次和 1 次的封板质量不是一回事
+  const reMark = rebuy ? `↺${breaks > 1 ? breaks : ""}` : "";
 
   const body = (
     <Box
@@ -39,6 +46,13 @@ function Cell({
           {up ? "+" : ""}
           {s.pct.toFixed(2)}
         </Typography>
+      ) : s.reseal ? (
+        // 涨停池没收录、按收盘涨幅兜底判定的回封票:回封时刻拿不到,只报炸板次数
+        <Typography
+          sx={{ fontSize: px(13), fontWeight: 700, lineHeight: 1.4, color: badSeal ? "#e5484d" : "#f5a623" }}
+        >
+          回封{reMark}
+        </Typography>
       ) : s.is_yizi ? (
         <Box
           component="span"
@@ -50,9 +64,11 @@ function Cell({
           一字板
         </Box>
       ) : (
-        <Typography sx={{ fontSize: px(13), lineHeight: 1.4, color: rebuy ? "#f5a623" : "#8b949e" }}>
+        <Typography
+          sx={{ fontSize: px(13), lineHeight: 1.4, color: badSeal ? "#e5484d" : rebuy ? "#f5a623" : "#8b949e" }}
+        >
           {fmtSeal(s.last_seal || s.first_seal)}
-          {rebuy ? "↺" : ""}
+          {reMark}
         </Typography>
       )}
 
@@ -76,13 +92,19 @@ function Cell({
   );
 
   if (!onPick) return body;
-  return (
-    <Tooltip
-      title={`${s.code} · ${s.industry}${s.broken ? " · 昨日连板今日断板" : ` · 封流比${(s.seal_strength * 100).toFixed(2)}%`}${rebuy ? ` · 炸板${s.break_times}次后回封` : ""} · 点击看分时`}
-    >
-      {body}
-    </Tooltip>
-  );
+  const tip = [
+    `${s.code} · ${s.industry}`,
+    s.broken
+      ? "昨日连板今日断板"
+      : s.reseal
+        ? "尾盘回封(涨停池未收录,按收盘涨幅判定;封板时刻与封单强度未知)"
+        : `封流比${(s.seal_strength * 100).toFixed(2)}%`,
+    rebuy ? `炸板${breaks}次${badSeal ? ",封板质量差" : "后回封"}` : "",
+    "点击看分时",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return <Tooltip title={tip}>{body}</Tooltip>;
 }
 
 /**

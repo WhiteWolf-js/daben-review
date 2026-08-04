@@ -65,6 +65,8 @@ export interface LadderCell {
   seal_strength: number;
   pct: number;
   broken: boolean; // true=昨日连板今日断板,画删除线 + 显示涨跌幅
+  // true=涨停池未收录但收盘涨幅已到涨停(反复炸板尾盘回封),封板时刻与封单强度未知
+  reseal?: boolean;
 }
 export interface LadderBoard {
   rows: { boards: number; stocks: LadderCell[] }[];

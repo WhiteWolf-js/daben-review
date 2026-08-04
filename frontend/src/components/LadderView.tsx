@@ -61,7 +61,7 @@ export default function LadderView({
             </Typography>
             {d && (
               <Typography variant="caption" color="text.secondary">
-                涨停 {d.sealed} · 断板 {d.broken} · 最高 {d.max_board}板 · 时间=最终封板,↺=炸板后回封
+                涨停 {d.sealed} · 断板 {d.broken} · 最高 {d.max_board}板 · 时间=最终封板,↺N=炸板 N 次后回封
               </Typography>
             )}
           </Stack>
@@ -100,7 +100,8 @@ export default function LadderView({
           </Typography>
         )}
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1.5, display: "block" }}>
-          划线=昨日连板今日断板(后跟当日涨跌幅);橙色时间带 ↺=炸板后回封,封板质量打折;点个股看分时。
+          划线=昨日连板今日断板(后跟当日涨跌幅);↺N=炸板 N 次后回封,橙色打折、**红色(≥5 次)是烂板**;
+          「回封」=涨停池未收录、按收盘涨幅判定为涨停,封板时刻未知;点个股看分时。
         </Typography>
       </CardContent>
 

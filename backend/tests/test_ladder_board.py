@@ -11,10 +11,11 @@ import pytest
 from daban_review.metrics.ladder import ladder_board
 
 
-def _pools(limitup_rows=None, previous_rows=None):
+def _pools(limitup_rows=None, previous_rows=None, zbgc_rows=None):
     return {
         "limitup": pd.DataFrame(limitup_rows or []),
         "previous": pd.DataFrame(previous_rows or []),
+        "zbgc": pd.DataFrame(zbgc_rows or []),
     }
 
 
@@ -114,12 +115,106 @@ class TestBroken:
         assert [c["name"] for c in row["stocks"]] == ["封住", "断板"]
 
     def test_positive_pct_broken_kept(self):
-        """20cm 票涨 10% 也算断板(没到 20% 涨停),实测五洲医疗 +10.28。"""
+        """20cm 票涨 10% 也算断板(没到 20% 涨停),实测五洲医疗 +10.28。
+
+        代码必须用真实的创业板段 —— 涨停兜底判据按代码段取涨跌幅限制。
+        """
         d = ladder_board(_pools(
-            [], [{"code": "B", "name": "五洲医疗", "prev_boards": 4, "pct": 10.28, "industry": "医疗器械"}],
+            [], [{"code": "301234", "name": "五洲医疗", "prev_boards": 4, "pct": 10.28,
+                  "industry": "医疗器械"}],
         ))
         assert d["rows"][0]["boards"] == 5
+        assert d["rows"][0]["stocks"][0]["broken"] is True
         assert d["rows"][0]["stocks"][0]["pct"] == 10.28
+
+
+class TestReseal:
+    """涨停池漏收「反复炸板尾盘回封」的票 → 不能判成断板(实测 002827 高争民爆)。"""
+
+    def test_closed_at_limit_not_broken(self):
+        """收盘涨幅到涨停(+10.01) → 改判回封,并从炸板池补炸板次数。"""
+        d = ladder_board(_pools(
+            [],
+            [{"code": "002827", "name": "高争民爆", "prev_boards": 4, "pct": 10.01,
+              "industry": "化学制品"}],
+            [{"code": "002827", "name": "高争民爆", "first_seal": "092500", "break_times": 26}],
+        ))
+        c = d["rows"][0]["stocks"][0]
+        assert d["rows"][0]["boards"] == 5  # 昨日 4 板 + 今日涨停 = 5 板
+        assert c["broken"] is False and c["reseal"] is True
+        assert c["break_times"] == 26
+        assert d["sealed"] == 1 and d["broken"] == 0
+
+    def test_reseal_has_no_fake_seal_time(self):
+        """回封时刻拿不到就留空 —— 拿首封(09:25)顶替会把烂板显示成超早封一字。"""
+        d = ladder_board(_pools(
+            [],
+            [{"code": "002827", "name": "高争民爆", "prev_boards": 4, "pct": 10.01, "industry": "化学制品"}],
+            [{"code": "002827", "name": "高争民爆", "first_seal": "092500", "break_times": 26}],
+        ))
+        c = d["rows"][0]["stocks"][0]
+        assert c["first_seal"] == "" and c["last_seal"] == ""
+        assert c["seal_minutes"] is None
+        assert c["is_yizi"] is False
+        assert c["seal_strength"] == 0.0  # 炸板池没有封单数据,别假装有
+
+    def test_reseal_without_zbgc_row(self):
+        """炸板池也没收录时仍按涨停算,炸板次数退 0(宁可少标,不要判成断板)。"""
+        d = ladder_board(_pools(
+            [], [{"code": "600123", "name": "某主板", "prev_boards": 2, "pct": 9.98, "industry": "煤炭"}],
+        ))
+        c = d["rows"][0]["stocks"][0]
+        assert c["reseal"] is True and c["break_times"] == 0
+
+    def test_20cm_at_10pct_still_broken(self):
+        """创业板 +10.01 离 20% 涨停远得很 → 必须还是断板,不能被兜底判据捞上来。"""
+        d = ladder_board(_pools(
+            [], [{"code": "300123", "name": "某创业板", "prev_boards": 3, "pct": 10.01, "industry": "软件开发"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["broken"] is True
+
+    def test_20cm_at_limit_is_reseal(self):
+        d = ladder_board(_pools(
+            [], [{"code": "688123", "name": "某科创板", "prev_boards": 3, "pct": 19.97, "industry": "半导体"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["reseal"] is True
+
+    def test_mainboard_st_limit_is_10pct(self):
+        """主板 ST 涨停自 2026-07-06 起是 10%(旧规 5%)→ 戴帽不再单独判。"""
+        d = ladder_board(_pools(
+            [], [{"code": "600321", "name": "ST某某", "prev_boards": 2, "pct": 10.02, "industry": "房地产"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["reseal"] is True
+
+    def test_mainboard_st_at_old_5pct_is_broken(self):
+        """新规下 +5% 对主板 ST 已经不是涨停,必须还判断板。"""
+        d = ladder_board(_pools(
+            [], [{"code": "600321", "name": "*ST某某", "prev_boards": 2, "pct": 5.02, "industry": "房地产"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["broken"] is True
+
+    def test_gem_st_still_20pct(self):
+        """创业板 ST 仍是 20%:+10.01 不算涨停。"""
+        d = ladder_board(_pools(
+            [], [{"code": "300456", "name": "ST某创", "prev_boards": 2, "pct": 10.01, "industry": "软件开发"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["broken"] is True
+
+    def test_bj_limit_is_30pct(self):
+        d = ladder_board(_pools(
+            [], [{"code": "830123", "name": "某北交所", "prev_boards": 2, "pct": 29.94, "industry": "通用设备"}],
+        ))
+        assert d["rows"][0]["stocks"][0]["reseal"] is True
+
+    def test_reseal_sorted_after_clean_seal(self):
+        """封板时刻未知(seal_minutes=None)→ 排在同档正常封住的票后面。"""
+        d = ladder_board(_pools(
+            [_lim("600001", "一次封住", 5, "093000")],
+            [{"code": "002827", "name": "高争民爆", "prev_boards": 4, "pct": 10.01, "industry": "化学制品"}],
+            [{"code": "002827", "name": "高争民爆", "first_seal": "092500", "break_times": 26}],
+        ))
+        row = next(r for r in d["rows"] if r["boards"] == 5)
+        assert [c["name"] for c in row["stocks"]] == ["一次封住", "高争民爆"]
 
 
 class TestIndustries:
