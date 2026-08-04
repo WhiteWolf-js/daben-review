@@ -114,17 +114,7 @@ def get_ladder(date: str) -> dict:
     return {str(k): v for k, v in build_ladder(pools["limitup"]).items()}
 
 
-def _prev_trade_date(date: str) -> str | None:
-    """库里比 date 更早的最近一个交易日;没有返回 None。"""
-    conn = store.get_conn()
-    try:
-        row = conn.execute(
-            "SELECT MAX(date) FROM daily_limitup WHERE date < ?", (date,)
-        ).fetchone()
-    except Exception:  # noqa: BLE001
-        row = None
-    conn.close()
-    return row[0] if row and row[0] else None
+_prev_trade_date = store.prev_trade_date  # 与弱转强判据共用同一份取数,别在这里再写一遍
 
 
 def get_ladder_board(date: str) -> dict:
@@ -240,7 +230,12 @@ def save_report(date: str, markdown: str) -> None:
     pools = load_pools(date)
     emotion = compute_emotion(pools)
     phase = emotion.get("phase_hint", "未知")
-    profiles = {p["code"]: p for p in stock_profiles(pools["limitup"])}
+    # 标弱转强(昨炸板今涨停)——必须与候选池/回测同口径,否则同一只票两处分级会不一致
+    prev_zb = store.prev_zbgc_codes(date)
+    profiles = {
+        p["code"]: {**p, "w2s": p["code"] in prev_zb}
+        for p in stock_profiles(pools["limitup"])
+    }
 
     conn.execute(
         "INSERT OR REPLACE INTO emotion_metrics(date, metrics) VALUES(?,?)",
@@ -557,7 +552,9 @@ def get_auction_live() -> dict:
                 "note": "库里没有历史涨停池,先复盘一天再用"}
 
     pools = load_pools(prev)
-    profiles = stock_profiles(pools["limitup"])
+    # 竞价台的底分是「昨日画像分」,弱转强要按**昨日**那天的前一交易日算
+    prev_zb = store.prev_zbgc_codes(prev)
+    profiles = [{**p, "w2s": p["code"] in prev_zb} for p in stock_profiles(pools["limitup"])]
     pool = al.pick_pool(profiles)
     quotes = ak.realtime_quotes([p["code"] for p in pool])
 

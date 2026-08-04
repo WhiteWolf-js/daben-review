@@ -75,6 +75,7 @@ def build_candidate_pool(
     theme_rank: list[dict] | None = None,
     top: int = 5,
     theme_top: int = 5,
+    prev_zbgc: set[str] | None = None,
 ) -> dict:
     """构造四风格候选池。
 
@@ -83,6 +84,8 @@ def build_candidate_pool(
     themes: code → 题材名列表(akshare_client.ths_limitup_reasons)
     theme_rank: sector.theme_heat 输出,用于取「热度 top theme_top 题材」
     top: 每种风格保留几只
+    prev_zbgc: 前一交易日炸板池代码集(`store.prev_zbgc_codes`),用于标「弱转强」给 score 加分;
+      不传就没这份加分(与 score.grade_candidate 的可选 `w2s` 约定一致)
 
     返回 {"phase": ..., "theme_top": [...], "pool": {style: [item...]}},
     item 含打分因子原值 + score/grade/position/reasons + rank + price(涨停价,供触发价算式)。
@@ -98,7 +101,9 @@ def build_candidate_pool(
 
     # 全池打分(纯规则,与次日验证同口径)
     scored: list[dict] = []
+    zb = prev_zbgc or set()
     for p in stock_profiles(lim):
+        p = {**p, "w2s": p["code"] in zb}  # 弱转强:昨炸板今涨停
         g = grade_candidate(p, phase)
         my_themes = themes.get(p["code"], [])
         scored.append({

@@ -42,6 +42,8 @@ def grade_candidate(stock: dict, phase_hint: str) -> dict:
     """对一只候选个股打分。
 
     stock: ladder.stock_profiles 的画像 dict(boards/seal_strength/first_seal/break_times/turnover)。
+      可选 `w2s`(bool)= 弱转强(前一交易日在炸板池、今日涨停)。**供不上就不给这份加分**,
+      所以老调用方不用改;要吃这个因子的调用方(候选池/回测/次日验证)负责先标好。
     phase_hint: 当日情绪周期(emotion.phase_hint)。
     返回 {grade, position, score, reasons}。
     """
@@ -106,6 +108,17 @@ def grade_candidate(stock: dict, phase_hint: str) -> dict:
         reasons.append("4板高位(接力起点,赔率转差)")
     elif 1 <= boards <= 3:
         score += 1
+
+    # 弱转强(前日炸板 → 今日涨停):本地回测 22 个交易日 1508 样本,弱转强 n=27
+    # 胜率 74.1% / 均溢价 +3.19%,同板位对照(它们 26/27 是首板)1 板其余 n=1254
+    # 胜率 58% / 均 +1.24% —— 差距没被身位吃掉;置换检验 p=0.0136。
+    # **这是与现有因子方向相反的独立信号**:弱转强票平均封流比更低(0.82% vs 1.08%)、
+    # 换手更高(13.5 vs 7.1),按上面的「强封加分/低换手加分」它们本该被扣分。
+    # 给 +2(与「超早封」同档,那条的超额是 +1.3pp、这条 +1.8pp)。
+    # ⚠️ n=27 偏薄(占涨停票约 1.8%),样本随 cli backtest 自动积累,过一个月复核一次。
+    if stock.get("w2s"):
+        score += 2
+        reasons.append("弱转强(昨炸板今涨停)")
 
     if score >= 4:
         grade = "A+"

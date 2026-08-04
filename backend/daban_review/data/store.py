@@ -168,6 +168,36 @@ def read_auction_series(date: str) -> dict[str, list[dict]]:
     return out
 
 
+# ---- 弱转强判据用:前一交易日 + 当日炸板名单 ----
+
+def prev_trade_date(date: str) -> str | None:
+    """库里比 date 更早的最近一个有涨停池的交易日;没有返回 None。"""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT MAX(date) FROM daily_limitup WHERE date < ?", (date,)).fetchone()
+    except Exception:  # noqa: BLE001 表还没建时当作没有
+        row = None
+    conn.close()
+    return row[0] if row and row[0] else None
+
+
+def zbgc_codes(date: str) -> set[str]:
+    """某日炸板池的代码集合;取不到返回空集(调用方据此退化为不给弱转强加分)。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT code FROM daily_zbgc WHERE date=?", (date,)).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    conn.close()
+    return {str(r[0]) for r in rows if r and r[0]}
+
+
+def prev_zbgc_codes(date: str) -> set[str]:
+    """前一交易日的炸板名单 —— 「弱转强 = 昨炸板今涨停」的判据。"""
+    prev = prev_trade_date(date)
+    return zbgc_codes(prev) if prev else set()
+
+
 # ---- 盘中切换(intraday_rotation):板块分时曲线缓存 ----
 
 def _ensure_rotation(conn: sqlite3.Connection) -> None:

@@ -238,6 +238,39 @@ class TestPhaseEffects:
         assert r["position"] == "2-3成"
 
 
+class TestWeakToStrong:
+    """弱转强(前日炸板 → 今日涨停)+2。
+
+    本地回测 22 交易日 1508 样本:弱转强 n=27 胜率 74.1% / 均溢价 +3.19%,
+    同板位(它们 26/27 是首板)对照 n=1254 胜 58% / 均 +1.24%,置换检验 p=0.0136。
+    """
+
+    _BASE = {"seal_strength": 0.005, "first_seal": "103000", "break_times": 0,
+             "turnover": 10, "boards": 1}
+
+    def test_adds_two_points(self):
+        off = grade_candidate(self._BASE, "未知")
+        on = grade_candidate({**self._BASE, "w2s": True}, "未知")
+        assert on["score"] - off["score"] == 2
+        assert "弱转强(昨炸板今涨停)" in on["reasons"]
+
+    def test_absent_field_gives_no_bonus(self):
+        """老调用方供不上 w2s 就不该拿到加分(向后兼容的关键)。"""
+        assert grade_candidate(self._BASE, "未知")["score"] == \
+            grade_candidate({**self._BASE, "w2s": False}, "未知")["score"]
+
+    def test_can_lift_grade(self):
+        """+2 足以把 B 抬到 A —— 这才是这个因子的实际作用。"""
+        assert grade_candidate(self._BASE, "未知")["grade"] == "B"
+        assert grade_candidate({**self._BASE, "w2s": True}, "未知")["grade"] == "A"
+
+    def test_does_not_bypass_a_plus_hard_gate(self):
+        """弱转强票平均封流比只有 0.82%,过不了 A+ 硬门槛(需强封)——
+        不能因为加了 2 分就让它跳过门禁,n=27 不足以支撑放宽硬门槛。"""
+        r = grade_candidate({**self._BASE, "first_seal": "092500", "w2s": True}, "未知")
+        assert r["grade"] != "A+"
+
+
 class TestRobustness:
     def test_empty_stock_defaults(self):
         # 全缺省字段:仅 break=0 给 +1

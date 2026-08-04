@@ -57,21 +57,32 @@ def collect(dates: list[str] | None = None,
         return cache[code]
 
     rows: list[dict] = []
-    for date in dates:
+    # 每日炸板名单:判「弱转强 = 前一交易日炸板、今日涨停」。在循环外一次读完,
+    # 别在循环里调 store.prev_zbgc_codes —— 那会每天开一次连接。
+    zb_by_date = {
+        d: set(z["code"].astype(str))
+        for d in all_dates
+        if (z := store.read_df(conn, "daily_zbgc", d)) is not None and not z.empty
+    }
+
+    for i, date in enumerate(dates):
         pools = {n: store.read_df(conn, t, date) for n, t in fetch.TABLE.items()}
         if pools["limitup"].empty:
             continue
         phase = compute_emotion(pools).get("phase_hint", "未知")
+        di = all_dates.index(date)
+        prev_zb = zb_by_date.get(all_dates[di - 1], set()) if di > 0 else set()
         for p in stock_profiles(pools["limitup"]):
             prem = _open_prem(bars(p["code"]), date)
             if prem is None:
                 continue
-            g = grade_candidate(p, phase)
+            w2s = p["code"] in prev_zb
+            g = grade_candidate({**p, "w2s": w2s}, phase)
             rows.append({
                 "date": date, "code": p["code"], "grade": g["grade"], "score": g["score"],
                 "seal": float(p["seal_strength"] or 0), "fmin": _first_seal_minutes(p["first_seal"]),
                 "breaks": int(p["break_times"] or 0), "turn": float(p["turnover"] or 0),
-                "boards": int(p["boards"] or 0), "phase": phase, "prem": prem,
+                "boards": int(p["boards"] or 0), "w2s": w2s, "phase": phase, "prem": prem,
             })
     conn.close()
     return rows
@@ -126,7 +137,12 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 
 
 def summarize(rows: list[dict]) -> dict:
-    """结构化汇总:by_grade / by_phase / by_boards / corr。供程序化使用或渲染。"""
+    """结构化汇总:by_grade / by_phase / by_boards / by_w2s / corr。供程序化使用或渲染。
+
+    by_w2s 单列出来是为了**每次回测都复核弱转强这个因子** —— 它进 score.py 时只有
+    n=27(p=0.0136),偏薄;样本随交易日累积,不单列就没人会去看它是否还成立。
+    对照组要用「同板位」而不是全样本:弱转强票几乎全是首板(26/27)。
+    """
     def by(key: str, values) -> dict:
         return {v: agg([r for r in rows if r[key] == v])
                 for v in values if agg([r for r in rows if r[key] == v])}
@@ -141,6 +157,13 @@ def summarize(rows: list[dict]) -> dict:
         "by_boards": {b: agg([r for r in rows if r["boards"] == b])
                       for b in sorted({r["boards"] for r in rows})
                       if agg([r for r in rows if r["boards"] == b])},
+        # 弱转强 vs 同板位对照(只比 1 板,弱转强 26/27 是首板,拿全样本比会高估)
+        "by_w2s": {
+            k: a for k, a in (
+                ("弱转强", agg([r for r in rows if r.get("w2s")])),
+                ("1板对照", agg([r for r in rows if not r.get("w2s") and r["boards"] == 1])),
+            ) if a
+        },
         "pearson": pearson(xs, ys),
         "spearman": spearman(xs, ys),
     }
@@ -172,6 +195,15 @@ def format_report(rows: list[dict]) -> str:
     for b, a in s["by_boards"].items():
         if a["n"] >= 3:
             out.append(line(f"{b}板", a))
+
+    if s["by_w2s"]:
+        out.append("\n弱转强(昨炸板今涨停,对照组=同为首板的其余票):")
+        out.append(f"  {'':<10}{'n':>6}{'胜率':>8}{'平均溢价':>10}{'中位':>9}")
+        for k, a in s["by_w2s"].items():
+            out.append(line(k, a))
+        w = s["by_w2s"].get("弱转强")
+        if w and w["n"] < 40:
+            out.append(f"  ⚠️ 样本仅 {w['n']} 条,进 score.py 时是 27 条(p=0.0136),攒到 ~40 条再复核阈值")
 
     out.append(f"\nscore ↔ 隔日溢价:  Pearson={s['pearson']:+.3f}   Spearman={s['spearman']:+.3f}")
     return "\n".join(out)
