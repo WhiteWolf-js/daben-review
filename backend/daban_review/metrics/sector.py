@@ -74,11 +74,22 @@ def theme_heat(
     top: int = 12,
     min_count: int = 2,
     quotes: dict[str, dict] | None = None,
+    order: str = "count",
 ) -> list[dict]:
     """按题材(同花顺涨停原因标签)聚合涨停池,一只票的多个题材分别计入。
 
     题材维度比行业更贴近当日炒作主线(哈药=医药+科技)。只保留 ≥min_count 只涨停的题材——
-    单票独有的题材是个股标签、不构成板块效应。themes 为空(拉取失败)时返回 []。
+    **单票独有的题材是个股标签、不构成板块效应**(天梯 chip 判「真板块」用的就是这条)。
+    themes 为空(拉取失败)时返回 []。
+
+    order:
+    - `count`(默认,**别改**)—— 按涨停家数。`runner.run_review` 喂给 agent 的
+      `get_sector_heat` 用这个;改了会变动 agent 的输入,按仓库铁律得同日复跑比对。
+    - `position` —— 按身位 (最高板, 连板数, 涨停数)。给前端题材热度面板用:
+      家数排序会把「中报预增(13只/1连)」「超跌反弹(12只/0连)」这类**泛标签**顶到前排,
+      它们是标签不是方向;真主线的特征是有连板高度(实测改成身位后前排变成
+      具身智能 3只/7板、AI教育 2只/7板、液冷服务器、商业航天)。与
+      `candidate_pool._theme_ranks` 同口径。
 
     quotes(可选,来自 akshare_client.concept_quotes)给每个题材附板块强度:pct(板块涨幅%)、
     board_high(板块内最高身位)、board_zt(同花顺口径板块涨停数)。同花顺只出 top20 板块,
@@ -103,7 +114,10 @@ def theme_heat(
             b["stocks"].append({"code": code, "name": str(r.get("name")), "boards": boards})
 
     res = [b for b in buckets.values() if b["zt_count"] >= min_count]
-    res.sort(key=lambda x: (x["zt_count"], x["max_board"]), reverse=True)
+    if order == "position":
+        res.sort(key=lambda x: (x["max_board"], x["lianban_count"], x["zt_count"]), reverse=True)
+    else:
+        res.sort(key=lambda x: (x["zt_count"], x["max_board"]), reverse=True)
     for b in res:
         b["stocks"].sort(key=lambda s: s["boards"], reverse=True)
         b["stocks"] = b["stocks"][:8]

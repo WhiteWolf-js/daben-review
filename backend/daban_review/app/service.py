@@ -114,11 +114,49 @@ def get_ladder(date: str) -> dict:
     return {str(k): v for k, v in build_ladder(pools["limitup"]).items()}
 
 
-def get_ladder_board(date: str) -> dict:
-    """天梯图数据:各档封住的票 + 昨日连板今日断板的票 + 行业分布(供 LadderPoster 出图)。"""
-    from ..metrics import ladder_board
+def _prev_trade_date(date: str) -> str | None:
+    """库里比 date 更早的最近一个交易日;没有返回 None。"""
+    conn = store.get_conn()
+    try:
+        row = conn.execute(
+            "SELECT MAX(date) FROM daily_limitup WHERE date < ?", (date,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        row = None
+    conn.close()
+    return row[0] if row and row[0] else None
 
-    return ladder_board(load_pools(date))
+
+def get_ladder_board(date: str) -> dict:
+    """天梯图数据:各档封住的票 + 昨日连板今日断板的票 + 行业分布(供 LadderPoster 出图)。
+
+    格子里的「所属板块」用**当天真形成板块效应的题材**(≥2 只涨停)而非行业 ——
+    行业是静态分类且会误导(美利云恒为 IT服务Ⅱ,实际连板靠算力租赁)。
+    断板票今天没涨停原因,用昨日的补(见 `ladder.cell_sector` 的四级回退)。
+    题材/热度榜任一步失败都只是退化成显示行业,不该让天梯整个挂掉。
+    """
+    from ..data import akshare_client as ak
+    from ..metrics import ladder_board, theme_heat
+
+    pools = load_pools(date)
+    themes: dict[str, list[str]] = {}
+    prev_themes: dict[str, list[str]] = {}
+    hot: list[str] = []
+    try:
+        themes = ak.ths_limitup_reasons(date)
+        # 取全部 ≥2 只的题材(不是面板的 top12)——否则四成格子找不到归属。
+        # **这里按家数排,不按身位**:身位排序有自指偏差 —— 题材的「最高板」往往就是这只票
+        # 自己,于是 7 板票会把自己的小众题材顶成第一名(实测传智教育被标成「具身智能」
+        # 而非「AI教育」、通宇通讯被标成「商业航天」而非「CPO」)。
+        # chip 问的是「它有多少同伴」,厚度才是答案;面板问「今天主线是什么」才用身位。
+        hot = [t["theme"] for t in theme_heat(pools, themes, top=9999)]
+        pd_ = _prev_trade_date(date)
+        if pd_:
+            prev_themes = ak.ths_limitup_reasons(pd_)
+    except Exception as e:  # noqa: BLE001
+        log.warning("天梯题材归属拉取失败(退化为显示行业): %s", e)
+
+    return ladder_board(pools, themes=themes, prev_themes=prev_themes, hot_themes=hot)
 
 
 def get_intraday_rotation(date: str) -> dict:
@@ -594,8 +632,12 @@ def get_theme_heat(date: str) -> list[dict]:
     from ..data import akshare_client as ak
     from ..metrics import theme_heat
 
+    # order=position:按身位(最高板/连板数/涨停数)排,不按涨停家数 —— 家数排序会把
+    # 「中报预增(13只/1连)」「超跌反弹(12只/0连)」这类泛标签顶到前排,它们是标签不是方向。
+    # 注意只改这里(面板),不动 theme_heat 的默认口径,那个是 agent 的输入。
     return theme_heat(
-        load_pools(date), ak.ths_limitup_reasons(date), quotes=ak.concept_quotes(date)
+        load_pools(date), ak.ths_limitup_reasons(date), quotes=ak.concept_quotes(date),
+        order="position",
     )
 
 

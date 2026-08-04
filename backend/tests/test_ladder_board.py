@@ -235,6 +235,62 @@ class TestIndustries:
         assert sum(i["count"] for i in d["industries"]) == d["total"] == 4  # 断板票也计入行业分布
 
 
+class TestSector:
+    """格子里的「所属板块」:用当天真形成板块效应的题材,不用行业。
+
+    行业是申万静态分类,跟今天为什么涨停无关而且会误导 —— 实测美利云行业恒为
+    `IT服务Ⅱ` 但连板靠 `算力租赁`、胜通能源 `燃气Ⅱ` 实际是 `机器人`。
+    """
+
+    def _one(self, **kw):
+        d = ladder_board(_pools([_lim("A", "甲", 2, "093000", industry="IT服务Ⅱ")]), **kw)
+        return d["rows"][0]["stocks"][0]
+
+    def test_hot_theme_wins(self):
+        s = self._one(themes={"A": ["东数西算", "算力租赁"]}, hot_themes=["算力租赁", "东数西算"])
+        assert (s["sector"], s["sector_hot"]) == ("算力租赁", True)
+
+    def test_picks_best_ranked_among_hot(self):
+        """多个题材都成板块时取热度最好的那个(hot_themes 已按热度排好序)。"""
+        s = self._one(themes={"A": ["东数西算", "算力租赁"]}, hot_themes=["东数西算", "算力租赁"])
+        assert s["sector"] == "东数西算"
+
+    def test_fragment_theme_marked_not_hot(self):
+        """只此一只的碎片标签仍比行业有信息量,但要标成非真板块(前端暗一档)。"""
+        s = self._one(themes={"A": ["宁德时代供应商"]}, hot_themes=["算力租赁"])
+        assert (s["sector"], s["sector_hot"]) == ("宁德时代供应商", False)
+
+    def test_falls_back_to_industry_without_roman_suffix(self):
+        s = self._one(themes={}, hot_themes=[])
+        assert (s["sector"], s["sector_hot"]) == ("IT服务", False)  # 去掉 Ⅱ
+
+    def test_industry_kept_alongside(self):
+        """原 industry 字段不动 —— 行业分布与 tooltip 还要用。"""
+        s = self._one(themes={"A": ["算力租赁"]}, hot_themes=["算力租赁"])
+        assert s["industry"] == "IT服务Ⅱ"
+
+    def test_broken_stock_uses_yesterday_theme(self):
+        """断板票今天没涨停 → 没有今日涨停原因,用昨日的补(它昨天靠什么涨的)。"""
+        d = ladder_board(
+            _pools([], [{"code": "B", "name": "断", "prev_boards": 3, "pct": -4.8, "industry": "电网设备"}]),
+            themes={},
+            prev_themes={"B": ["可控核聚变"]},
+            hot_themes=["可控核聚变"],
+        )
+        s = d["rows"][0]["stocks"][0]
+        assert s["broken"] is True
+        assert (s["sector"], s["sector_hot"]) == ("可控核聚变", True)
+
+    def test_today_theme_beats_yesterday(self):
+        s = self._one(themes={"A": ["今日题材"]}, prev_themes={"A": ["昨日题材"]}, hot_themes=["昨日题材"])
+        assert s["sector"] == "今日题材"  # 有今日的就不看昨日
+
+    def test_no_themes_passed_degrades_to_industry(self):
+        """不传题材参数时退化成老行为(别的调用方不受影响)。"""
+        s = self._one()
+        assert s["sector"] == "IT服务" and s["sector_hot"] is False
+
+
 class TestEmpty:
     def test_empty_pools(self):
         d = ladder_board({})

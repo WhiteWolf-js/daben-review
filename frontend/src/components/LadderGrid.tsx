@@ -83,17 +83,26 @@ function Cell({
       >
         {s.name}
       </Typography>
+      {/* 所属板块 = 当天真形成板块效应的题材(不是行业:行业是静态分类且会误导,
+          美利云恒为「IT服务Ⅱ」而它连板靠「算力租赁」)。
+          亮橙=有同题材联动票托底;暗灰=孤票/碎片标签/退回行业 —— 扫一眼就知道哪些票有板块托底。
+          长题材名截断,全称与全部信息进 tooltip(格子只有 1/8 宽,放不下 7 字以上)。 */}
       <Typography
-        sx={{ fontSize: px(11), color: s.broken ? "#484f58" : "#f5a623", lineHeight: 1.4, whiteSpace: "nowrap" }}
+        sx={{
+          fontSize: px(11), lineHeight: 1.4, whiteSpace: "nowrap",
+          overflow: "hidden", textOverflow: "ellipsis",
+          color: s.broken ? "#484f58" : s.sector_hot ? "#f5a623" : "#6e7681",
+        }}
       >
-        {s.industry}
+        {s.sector || s.industry}
       </Typography>
     </Box>
   );
 
   if (!onPick) return body;
   const tip = [
-    `${s.code} · ${s.industry}`,
+    // 题材是「今天为什么涨」,行业是静态归类,两个都给
+    `${s.code} · ${s.sector}${s.sector_hot ? "(当日板块)" : "(无同题材联动)"} · 行业 ${s.industry}`,
     s.broken
       ? "昨日连板今日断板"
       : s.reseal

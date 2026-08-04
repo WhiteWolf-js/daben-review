@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 
@@ -91,8 +93,62 @@ def _limit_pct(code: str) -> float:
     return 10.0      # 沪深主板(含 ST)
 
 
-def ladder_board(pools: dict, industry_min: int = INDUSTRY_MIN_COUNT) -> dict:
+_SW_SUFFIX = re.compile(r"[ⅠⅡⅢⅣ]+$")
+
+
+def _clean_industry(name: str) -> str:
+    """去掉申万行业名的罗马数字后缀(`燃气Ⅱ`→`燃气`)—— 纯展示噪音,格子里空间金贵。"""
+    return _SW_SUFFIX.sub("", str(name or "").strip())
+
+
+def cell_sector(
+    code: str,
+    industry: str,
+    themes: dict[str, list[str]] | None,
+    prev_themes: dict[str, list[str]] | None,
+    hot_rank: dict[str, int] | None,
+) -> tuple[str, bool]:
+    """个股在天梯格子里显示的「所属板块」→ (标签, 是否真板块)。
+
+    为什么不用行业:行业是申万静态分类,跟今天为什么涨停无关,而且源头名字被截断。
+    实测美利云行业恒为 `IT服务Ⅱ`,而它连板靠的是 `算力租赁`;豪尔赛行业 `装修装饰`
+    实际是 `液冷服务器`、胜通能源 `燃气Ⅱ` 实际是 `机器人` —— 行业在这里是**主动误导**。
+
+    四级回退(实测 0804 逐级累计覆盖 82% → 99% → 100% → 兜底):
+    1. 该股今日题材里**当天真形成板块效应**的(hot_rank 来自 theme_heat 的 ≥2 只题材),
+       取热度最好的那个 → 返回 True
+    2. 榜外的今日题材(只此一只的碎片标签)→ 返回 False
+    3. 今日无题材(断板票今天没涨停,自然没有涨停原因)→ 用**昨日**题材同样处理。
+       语义也对:「昨日连板今日断板」问的就是它昨天靠什么涨的
+    4. 都没有 → 行业(去罗马后缀),返回 False
+
+    第二个返回值供前端分层:真板块亮色、碎片/昨日暗一档 —— 一眼看出哪些票有板块托底、
+    哪些是孤票,正对应方法论里「有无同题材联动票同步」。
+    """
+    rank = hot_rank or {}
+    for src in (themes, prev_themes):
+        ts = (src or {}).get(code) or []
+        if not ts:
+            continue
+        hot = sorted((rank[t], t) for t in ts if t in rank)
+        if hot:
+            return hot[0][1], True
+        return ts[0], False  # 有题材但都不成板块 → 碎片标签
+    return _clean_industry(industry), False
+
+
+def ladder_board(
+    pools: dict,
+    industry_min: int = INDUSTRY_MIN_COUNT,
+    themes: dict[str, list[str]] | None = None,
+    prev_themes: dict[str, list[str]] | None = None,
+    hot_themes: list[str] | None = None,
+) -> dict:
     """天梯图数据:每档 = 今日封住的票 + **昨日连板今日断板的票**,外加行业分布。
+
+    themes / prev_themes(code → 题材名列表,来自 `ths_limitup_reasons`)与
+    hot_themes(当天 ≥2 只的题材名,按热度排好序)都是**可选**的:不传就退化成
+    只显示行业的老行为,免得动到别的调用方。
 
     断板票来源是 `previous`(昨日涨停今日表现)而非炸板池 —— 断板不一定摸过板
     (实测长缆科技 6 板位置 −4.83%,全天没碰涨停,压根不在炸板池里),
@@ -106,6 +162,12 @@ def ladder_board(pools: dict, industry_min: int = INDUSTRY_MIN_COUNT) -> dict:
     """
     lim = pools.get("limitup", pd.DataFrame())
     prev = pools.get("previous", pd.DataFrame())
+    # 热度名 → 排名(0 最强)。只含 ≥2 只的题材,即「当天真形成板块效应」的那批
+    hot_rank = {t: i for i, t in enumerate(hot_themes or [])}
+
+    def _sector(code: str, industry: str) -> dict:
+        label, is_hot = cell_sector(code, industry, themes, prev_themes, hot_rank)
+        return {"sector": label, "sector_hot": is_hot}
 
     sealed_codes: set[str] = set()
     by_board: dict[int, list[dict]] = {}
@@ -120,6 +182,7 @@ def ladder_board(pools: dict, industry_min: int = INDUSTRY_MIN_COUNT) -> dict:
                 mins = first_min
             by_board.setdefault(p["boards"], []).append({
                 "code": p["code"], "name": p["name"], "industry": p["industry"],
+                **_sector(p["code"], p["industry"]),
                 "first_seal": p["first_seal"], "last_seal": p["last_seal"],
                 "seal_minutes": mins,  # 排序与展示都用最终封板
                 # 真一字要求全天没开板:一字后炸了又回封的,该显示回封时间而不是标一字
@@ -146,6 +209,7 @@ def ladder_board(pools: dict, industry_min: int = INDUSTRY_MIN_COUNT) -> dict:
             pct = round(_num(r.get("pct")), 2)
             base = {
                 "code": code, "name": name, "industry": str(r.get("industry")),
+                **_sector(code, str(r.get("industry"))),
                 "first_seal": "", "last_seal": "", "seal_minutes": None, "is_yizi": False,
                 "seal_strength": 0.0, "pct": pct,
             }

@@ -56,7 +56,12 @@ export const getLadder = (d: string) => http.get<Ladder>(`/api/ladder/${d}`).the
 export interface LadderCell {
   code: string;
   name: string;
-  industry: string;
+  industry: string; // 申万行业(静态分类,只进 tooltip)
+  // 格子里显示的「所属板块」= 当天真形成板块效应的题材(≥2只涨停);
+  // 依次回退:今日热门题材 → 今日碎片题材 → 昨日题材(断板票) → 行业
+  sector: string;
+  sector_hot: boolean; // true=能在题材热度里找到(有同题材联动票),前端亮色;false=孤票/碎片,暗一档
+
   first_seal: string; // HHMMSS,断板票为空
   last_seal?: string; // 最终封板时间(展示用:几点才真正稳住)
   break_times?: number; // >0 = 炸板后回封,封板质量打折
