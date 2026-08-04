@@ -10,8 +10,15 @@ A股 打板/短线的**情绪面 + 连板属性博弈**复盘与监控系统。�
   - 后端 `com.tiger.daban-backend` → http://localhost:8000(uvicorn,**未开 --reload**)
   - 前端 `com.tiger.daban-frontend` → http://localhost:5173(vite,有热更新)
   - **飞书机器人 `com.tiger.daban-bot`**(WebSocket 长连接,全天在线,私聊查盘)
-  - plist:`~/Library/LaunchAgents/com.tiger.daban-{backend,frontend,bot}.plist`
-  - 日志:`data/logs/{backend,frontend,bot}.log`
+  - **盘中监控 `com.tiger.daban-watcher`** —— 与上面三个不同,它是
+    **`StartCalendarInterval` 周一至五 09:20 定时拉起,`KeepAlive=false`**。
+    原因:`watcher.run()` 到 15:00 会自己 break 退出(设计如此),配 KeepAlive 会变成
+    收盘后整晚「拉起→立刻退出→再拉起」空转。9:20 起是因为 `_OPEN=9:25`,循环会 sleep 等到点。
+    周末靠 `Weekday` 挡;**法定节假日挡不住**,由 `_is_trade_day()` 守卫自己退出
+    (判据=通达信当日日线是否已生成;没有节假日日历可用,akshare 那个走 py_mini_racer,本机已坏)。
+    守卫**在 9:35 后才生效**,更早判会把真交易日误杀(当日日线要开盘有成交才生成)。
+  - plist:`~/Library/LaunchAgents/com.tiger.daban-{backend,frontend,bot,watcher}.plist`
+  - 日志:`data/logs/{backend,frontend,bot,watcher}.log`
 
 > 别在 launchd 之外再手动起一份 uvicorn:手动那份绑 `127.0.0.1:8000` 会**优先响应 localhost**,
 > 导致你以为改的后端代码没生效(踩过,新接口一直 404)。查占用:`lsof -nP -iTCP:8000 -sTCP:LISTEN`。
@@ -23,6 +30,8 @@ A股 打板/短线的**情绪面 + 连板属性博弈**复盘与监控系统。�
 | 改后端代码后重启 | `launchctl kickstart -k gui/$U/com.tiger.daban-backend` |
 | 改机器人代码后重启 | `launchctl kickstart -k gui/$U/com.tiger.daban-bot` |
 | 改前端 | 不用重启(vite HMR) |
+| 盘中监控立刻起一次(当天忘了/临时要) | `launchctl kickstart gui/$U/com.tiger.daban-watcher`(**不加 `-k`**:加了会杀掉正在跑的那个) |
+| 确认监控在跑 | `curl -s localhost:8000/api/live \| grep -o '"running":[a-z]*'`(判活=快照 3 分钟内有更新) |
 | 看状态 | `launchctl print gui/$U/com.tiger.daban-backend \| grep -E "state\|pid"` |
 | 停 + 禁自启 | `launchctl bootout gui/$U/com.tiger.daban-<backend\|frontend>` |
 | 重新加载 | `launchctl bootstrap gui/$U ~/Library/LaunchAgents/com.tiger.daban-*.plist` |

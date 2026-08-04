@@ -40,6 +40,29 @@ def _in_rush(t: dt.time) -> bool:
     return any(a <= t < b for a, b in _RUSH)
 
 
+# 交易日判定的生效时刻。**不能在启动时判** —— 通达信当日日线要开盘有成交才生成,
+# 9:20 拉不到,那会儿判会把真交易日误杀。9:35 之后再判,之前照常轮询
+# (9:25–9:35 恰好是竞价+开盘的关键窗口,不能为了判日历把它跳过)。
+_TRADE_DAY_GUARD_AT = dt.time(9, 35)
+
+
+def _is_trade_day(date: str, now: dt.time) -> bool | None:
+    """今天是不是交易日。返回 None = 还判不出来(时候太早 / 拉取失败),调用方应继续等。
+
+    没有可用的节假日日历:akshare 的 `tool_trade_date_hist_sina` 走 py_mini_racer,
+    本机该库已坏(`dlsym: mr_eval_context symbol not found`)。所以用「通达信**当日**日线
+    是否已生成」反推 —— 实测盘中 `daily_bars` 就带当天那根,而非交易日永远不会有。
+    拉取异常一律返回 None(不当作非交易日),免得网络抖动把监控误杀。
+    """
+    if now < _TRADE_DAY_GUARD_AT:
+        return None
+    try:
+        return date in ak.daily_bars("000001", 3)["date"].tolist()
+    except Exception as e:  # noqa: BLE001
+        log.warning("交易日判定失败(按未知处理,继续监控): %s", e)
+        return None
+
+
 def poll_once(date: str) -> tuple[dict, dict]:
     """拉一轮实时数据 → (快照, 指数近N分钟跌幅)。单项失败不阻断整轮。"""
     ts = dt.datetime.now().strftime("%H:%M")
@@ -87,6 +110,7 @@ def run(once: bool = False) -> None:
     log.info("盘中监控启动 %s(飞书推送 %s)", date, "已配置" if notify_on else "未配置——只打日志")
     pushed: set[str] = set()
     prev: dict | None = None
+    trade_day: bool | None = None  # 交易日判定结果,判出来一次就不再判
 
     while True:
         now = dt.datetime.now().time()
@@ -96,6 +120,13 @@ def run(once: bool = False) -> None:
         if not _in_session(now):
             time.sleep(30)
             continue
+        # 节假日 launchd 也会按周一至五把它拉起来,靠这里自己退出,免得整天空转
+        # 并让前端实时条显示成「监控中」。
+        if trade_day is None:
+            trade_day = _is_trade_day(date, now)
+            if trade_day is False:
+                log.info("%s 不是交易日(通达信无当日数据),监控退出", date)
+                break
         try:
             snap, idx = poll_once(date)
             events = signals.detect_events(prev, snap, idx, pushed)
