@@ -353,6 +353,42 @@ export interface CandidatesStats {
 export const getCandidatesStats = () =>
   http.get<CandidatesStats>("/api/candidates-stats").then((r) => r.data);
 
+// ---- 候选池完整备选(纯规则、零 token)。「明日候选」只显示 agent 选的 rank1,这里给 rank2-N ----
+/** 该票身位最强的成板块题材 + 联动读数;全是单票碎片时为 null(孤票) */
+export interface PoolLink {
+  theme: string;
+  zt_count: number; // 该题材当日涨停家数
+  lianban_count: number; // 其中连板数
+  max_board: number; // 题材内最高板
+  pct: number | null; // 板块涨幅(同花顺 top20 外为 null)
+}
+export interface PoolItem {
+  code: string;
+  name: string;
+  boards: number;
+  grade: string;
+  score: number;
+  position: string;
+  rank: number; // 池内名次,1 为最优
+  price: number; // 当日涨停价,供推算次日触发价
+  seal_strength: number;
+  turnover: number;
+  break_times: number;
+  first_seal: string;
+  last_seal: string;
+  theme_rank: number | null;
+  w2s: boolean; // 弱转强(昨炸板今涨停)
+  reasons: string[];
+  link: PoolLink | null;
+}
+export interface CandidatePool {
+  date: string;
+  phase: string;
+  pool: Record<string, PoolItem[]>; // 风格 → 备选(默认只 A 级以上)
+}
+export const getCandidatePool = (date: string) =>
+  http.get<CandidatePool>(`/api/candidate-pool/${date}`).then((r) => r.data);
+
 // ---- 盘中实时监控(watcher 写库,前端只读轮询)----
 export interface LiveEvent {
   ts: string;

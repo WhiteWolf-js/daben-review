@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { Box, Card, CardContent, Chip, Link, Stack, Tooltip, Typography } from "@mui/material";
-import { getCandidates, getCandidatesStats, type Candidate, type CandidatesStats } from "../api";
+import {
+  getCandidatePool,
+  getCandidates,
+  getCandidatesStats,
+  type Candidate,
+  type CandidatePool,
+  type CandidatesStats,
+} from "../api";
+import PoolAlternatives from "./PoolAlternatives";
 
 const pct1 = (v: number) => `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
 
@@ -40,6 +48,8 @@ export default function CandidatePanel({
 }) {
   const [rows, setRows] = useState<Candidate[]>([]);
   const [stats, setStats] = useState<CandidatesStats | null>(null);
+  // 候选池完整备选(纯规则、零 token):agent 只写 rank1,池里 rank2-N 常也是 A 级
+  const [pool, setPool] = useState<CandidatePool | null>(null);
 
   useEffect(() => {
     if (!date) {
@@ -53,6 +63,16 @@ export default function CandidatePanel({
 
   useEffect(() => {
     getCandidatesStats().then(setStats).catch(() => setStats(null));
+  }, [date, reload]);
+
+  useEffect(() => {
+    if (!date) {
+      setPool(null);
+      return;
+    }
+    getCandidatePool(date)
+      .then(setPool)
+      .catch(() => setPool(null)); // 池子拿不到只是没有备选区,不影响主列表
   }, [date, reload]);
 
   const ov = stats?.overall;
@@ -168,6 +188,11 @@ export default function CandidatePanel({
                   评级依据:{c.reasons.join(" · ")}
                 </Typography>
               )}
+              {/* 同风格池内的其余 A 级票(剔掉 agent 已选的这只) */}
+              <PoolAlternatives
+                items={(pool?.pool[c.style] ?? []).filter((x) => x.code !== c.code)}
+                onPick={onPick}
+              />
             </Box>
           ))}
         </Stack>

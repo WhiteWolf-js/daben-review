@@ -122,6 +122,16 @@ def ladder_board_ep(date: str):
     return service.get_ladder_board(date)
 
 
+@app.get("/api/candidate-pool/{date}")
+def candidate_pool(date: str, grades: str = "A+,A"):
+    """四风格候选池的完整备选(默认只 A 级以上)+ 每只的板块联动。纯规则、零 token。
+
+    前端「明日候选」只显示 agent 选的 rank1,这里给出 rank2-5 供展开。
+    """
+    gs = tuple(g.strip() for g in grades.split(",") if g.strip())
+    return service.get_candidate_pool(date, gs or service._POOL_GRADES)
+
+
 @app.get("/api/intraday-rotation/{date}")
 def intraday_rotation(date: str):
     """盘中情绪切换:板块分时均涨幅曲线(大类/行业两个口径)+ 退潮/接棒配对 + 封板时序。

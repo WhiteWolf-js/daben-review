@@ -149,6 +149,66 @@ def get_ladder_board(date: str) -> dict:
     return ladder_board(pools, themes=themes, prev_themes=prev_themes, hot_themes=hot)
 
 
+_POOL_GRADES = ("A+", "A")
+
+
+def get_candidate_pool(date: str, grades: tuple[str, ...] = _POOL_GRADES) -> dict:
+    """四风格候选池的**完整备选**(默认只留 A 级以上),每只附板块联动。纯规则、零 token。
+
+    为什么要这个:前端「明日候选」读的是 `candidates` 表,那张表只存 agent 写进正文的
+    rank1,于是池里 rank2-5 的 A 级票全被藏起来(实测 0804 低位连板接力 5 只全是 A 级以上)。
+
+    ⚠️ **`theme_rank` 输入必须与 `runner.run_review` 完全一致(`theme_heat` 默认 top=12)**,
+    否则前端显示的池子和 agent 当时看到的不是同一个 —— 题材榜大小会改变 `theme_rank`,
+    进而改变 `_unplayable`(换手<1% 且无主线归属沉池尾)的判定。实测传 top=9999 时
+    欣天科技(换手0.55%)从池尾浮成 rank1,和生产口径的池子完全不同。踩过。
+
+    板块联动取**身位最强**的题材(最高板 → 连板数 → 涨停家数),与 `_theme_ranks` 同口径:
+    泛业绩标签(中报预增 13只但仅 1 连)家数最多却不是主线,按家数取会盖掉真方向。
+    """
+    from ..data import akshare_client as ak
+    from ..metrics import build_candidate_pool, compute_emotion, theme_heat
+
+    pools = load_pools(date)
+    if pools.get("limitup") is None or pools["limitup"].empty:
+        return {"date": date, "phase": "未知", "pool": {}}
+
+    emotion = compute_emotion(pools)
+    try:
+        themes = ak.ths_limitup_reasons(date)
+    except Exception as e:  # noqa: BLE001 题材拉不到只是没有联动信息,不该让池子出不来
+        log.warning("候选池题材拉取失败(无联动信息): %s", e)
+        themes = {}
+
+    heat_prod = theme_heat(pools, themes)                    # 生产口径 top12,喂给池子
+    heat_all = theme_heat(pools, themes, top=9999)           # 全量,仅用于查联动读数
+    by_theme = {t["theme"]: t for t in heat_all}
+    built = build_candidate_pool(pools, emotion, themes, heat_prod,
+                                 prev_zbgc=store.prev_zbgc_codes(date))
+
+    def _link(item: dict) -> dict | None:
+        """该票身位最强的成板块题材 + 家数/连板数/最高板;全是单票碎片则 None(孤票)。"""
+        cand = [t for t in (item.get("theme") or []) if t in by_theme]
+        if not cand:
+            return None
+        best = max(cand, key=lambda t: (by_theme[t]["max_board"], by_theme[t]["lianban_count"],
+                                        by_theme[t]["zt_count"]))
+        h = by_theme[best]
+        return {"theme": best, "zt_count": h["zt_count"], "lianban_count": h["lianban_count"],
+                "max_board": h["max_board"], "pct": h.get("pct")}
+
+    keep = {"code", "name", "boards", "grade", "score", "position", "rank", "price",
+            "seal_strength", "turnover", "break_times", "first_seal", "last_seal",
+            "theme_rank", "w2s", "reasons"}
+    out: dict[str, list[dict]] = {}
+    for style, items in built.get("pool", {}).items():
+        out[style] = [
+            {**{k: v for k, v in it.items() if k in keep}, "link": _link(it)}
+            for it in items if it["grade"] in grades
+        ]
+    return {"date": date, "phase": built.get("phase", "未知"), "pool": out}
+
+
 def get_intraday_rotation(date: str) -> dict:
     """盘中情绪切换(板块分时曲线 + 退潮/接棒配对)。**吃缓存**。
 
