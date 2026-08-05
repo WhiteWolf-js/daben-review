@@ -58,7 +58,8 @@ class TestGradeCandidate:
     def test_strong_early_clean_gives_a_plus(self):
         stock = {
             "seal_strength": 0.05,   # 超强封 ≥3% +3
-            "first_seal": "092500",  # 超早封 ≤9:45 +2
+            "first_seal": "092500",
+            "last_seal": "092500",   # 超早封 ≤9:45 +2(按最终封板算)
             "break_times": 0,        # 干净 +1
             "turnover": 10,          # 5-15% 中性 0
             "boards": 2,             # 低位身位 +1
@@ -68,19 +69,20 @@ class TestGradeCandidate:
         assert r["score"] == 7     # 3+2+1+0+1
         assert r["position"] == "3成"  # 未知周期基准仓位
         assert "超强封(封流比5.0%)" in r["reasons"]
-        assert "超早封(≤9:45,隔日溢价最高)" in r["reasons"]
+        assert "超早封(≤9:45稳住,隔日溢价最高)" in r["reasons"]
 
     def test_weak_late_broken_high_gives_d(self):
         stock = {
             "seal_strength": 0.002,  # 弱封 -1
-            "first_seal": "130000",  # 晚封 -1
+            "first_seal": "130000",
+            "last_seal": "143000",   # 尾盘才封 ≥14:00 -2
             "break_times": 4,        # 炸板≥3 -2
             "turnover": 40,          # 高换手 -1
             "boards": 6,             # 高位≥5 -2
         }
         r = grade_candidate(stock, "未知")
         assert r["grade"] == "D"
-        assert r["score"] == -7
+        assert r["score"] == -8
         # D 类无论周期都回避
         assert r["position"] == "回避/空仓"
         assert any("炸板4次" in x for x in r["reasons"])
@@ -146,15 +148,33 @@ class TestGradeCandidate:
         assert r["grade"] == "A+"
         assert not any("A+硬门槛" in x for x in r["reasons"])
 
-    def test_first_seal_only_super_early_and_afternoon_scored(self):
-        # 回测校准:9:45–13:00 中性(无区分),仅 ≤9:45 +2、午后 -1
+    def test_seal_time_uses_last_seal_not_first(self):
+        """封板时间因子的基准是**最终封板**:回测里 last_seal 判别力强于 first_seal
+        (r=-0.270 vs -0.207)且分档单调,故只留 last 一个,别两个都算。"""
         base = {"seal_strength": 0.005, "break_times": 3, "turnover": 40, "boards": 5}
-        superb = grade_candidate({**base, "first_seal": "092500"}, "未知")   # +2
-        midday = grade_candidate({**base, "first_seal": "101500"}, "未知")   # 中性 0
-        late = grade_candidate({**base, "first_seal": "140000"}, "未知")     # 午后 -1
-        assert superb["score"] - midday["score"] == 2
-        assert midday["score"] - late["score"] == 1
-        assert not any("早盘封" in x for x in midday["reasons"])
+        # 首封超早但拖到尾盘才稳住 → 按尾盘罚,不给超早封加分
+        early_first_late_last = grade_candidate(
+            {**base, "first_seal": "092500", "last_seal": "143000"}, "未知")
+        # 反之:首封晚但很快稳住(同一时刻)→ 中性档
+        mid = grade_candidate({**base, "first_seal": "101500", "last_seal": "101500"}, "未知")
+        superb = grade_candidate({**base, "first_seal": "092500", "last_seal": "092500"}, "未知")
+        assert superb["score"] - mid["score"] == 2                    # 超早封 +2
+        assert mid["score"] - early_first_late_last["score"] == 2     # 尾盘 -2
+        assert any("尾盘才封" in x for x in early_first_late_last["reasons"])
+        assert not any("超早封" in x for x in early_first_late_last["reasons"])
+
+    def test_seal_time_tiers(self):
+        base = {"seal_strength": 0.005, "break_times": 3, "turnover": 40, "boards": 5}
+        f = lambda t: grade_candidate({**base, "last_seal": t}, "未知")["score"]
+        assert f("092500") - f("101500") == 2   # ≤9:45 +2
+        assert f("101500") == f("133000")       # 9:45–14:00 全中性(回测无区分)
+        assert f("101500") - f("143000") == 2   # ≥14:00 -2
+
+    def test_falls_back_to_first_seal_when_last_missing(self):
+        """last_seal 缺失(如尾盘回封票故意留空)时退回首封,不能整个因子失效。"""
+        base = {"seal_strength": 0.005, "break_times": 0, "turnover": 40, "boards": 5}
+        assert grade_candidate({**base, "first_seal": "092500"}, "未知")["score"] == \
+            grade_candidate({**base, "first_seal": "092500", "last_seal": ""}, "未知")["score"]
 
     def test_seal_strength_tiers(self):
         # 封流比分档:≥3% +3 / 2-3% +2 / 1-2% +1 / <1% -1
