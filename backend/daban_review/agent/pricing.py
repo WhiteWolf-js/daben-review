@@ -1,4 +1,4 @@
-"""按 Opus 4.8 官方单价估算一次 agent 调用的成本。
+"""按 Opus 官方单价估算一次 agent 调用的成本。
 
 经中转网关时 SDK 的 total_cost_usd 常为 0/None,则按 usage 的 token 数 ×
 官方单价自算。金额是「若按官方 API 价值多少钱」的参考,不等于内部网关实际结算。
@@ -11,7 +11,11 @@ from ..config import CONFIG
 
 _PER_M = 1_000_000
 
-# Opus 4.8 官方单价(美元 / 每百万 token)
+# Opus 官方单价(美元 / 每百万 token)。**Opus 5 与 Opus 4.8 同价**
+# (2026-08-05 查 anthropic.com/news/claude-opus-5:"$5 per million input tokens and
+# $25 per million output tokens, unchanged from Claude Opus 4.8"),所以 .env 在
+# claude-opus-5 / claude-opus-4-8 之间切换**不用改这里**。
+# 换到 Sonnet 5($2/$10 introductory,9/1 起 $3/$15)或 Fable 5($10/$50)才要改。
 PRICE_INPUT = 5.0
 PRICE_OUTPUT = 25.0
 PRICE_CACHE_WRITE = 6.25  # 1.25 × input(5 分钟 TTL 写入)
