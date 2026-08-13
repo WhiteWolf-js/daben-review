@@ -5,11 +5,15 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
   FormControlLabel,
   Stack,
   Typography,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import ImageIcon from "@mui/icons-material/Image";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -20,12 +24,9 @@ import {
   type HoldingVerdict,
   type UsageCost,
 } from "../api";
-
-const VERDICT_COLOR: Record<string, "success" | "warning" | "error" | "default"> = {
-  持有: "success",
-  减仓: "warning",
-  清仓: "error",
-};
+import HoldingBoard, { type BoardRow } from "./HoldingBoard";
+import HoldingPoster, { HOLDING_WIDTH } from "./HoldingPoster";
+import { usePosterExport } from "../hooks/usePosterExport";
 
 const mdSx = {
   "& h1,& h2": { fontSize: 15, mt: 1.5, mb: 0.5, color: "primary.main" },
@@ -50,7 +51,9 @@ export default function HoldingAnalysis({ date, onAnalyzed }: { date: string; on
   const [verdicts, setVerdicts] = useState<Record<string, HoldingVerdict>>({});
   const [usage, setUsage] = useState<UsageCost | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [posterOpen, setPosterOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const { ref, exporting, download } = usePosterExport(`持仓处置_${date}.png`);
 
   useEffect(() => {
     getHoldings()
@@ -125,10 +128,10 @@ export default function HoldingAnalysis({ date, onAnalyzed }: { date: string; on
   }
 
   const allChecked = sel.length === rows.length;
-  // 有 priority 的按它排(agent 给的处置优先级:1=最该先动),没有则保持持仓顺序
-  const ordered = rows
+  // 只把已诊断的票交给速览板;排序(先动谁)由 HoldingBoard 自己按动作+优先级处理
+  const boardRows: BoardRow[] = rows
     .filter((h) => verdicts[h.code])
-    .sort((a, b) => (verdicts[a.code].priority ?? 99) - (verdicts[b.code].priority ?? 99));
+    .map((h) => ({ h, v: verdicts[h.code] }));
 
   return (
     <Box>
@@ -179,6 +182,14 @@ export default function HoldingAnalysis({ date, onAnalyzed }: { date: string; on
           {md ? "重新诊断" : "跑诊断"}
           {sel.length > 1 ? `(${sel.length}只)` : ""}
         </Button>
+        <Button
+          size="small"
+          startIcon={<ImageIcon />}
+          disabled={boardRows.length === 0}
+          onClick={() => setPosterOpen(true)}
+        >
+          导出速览图
+        </Button>
         {usage && (
           <Typography variant="caption" color="text.secondary">
             本次约 ¥{usage.cost_cny.toFixed(2)} · {(usage.total_tokens / 1000).toFixed(1)}k
@@ -186,42 +197,11 @@ export default function HoldingAnalysis({ date, onAnalyzed }: { date: string; on
         )}
       </Stack>
 
-      {/* 结构化买卖点:每只一行,按处置优先级排 */}
-      {ordered.length > 0 && (
-        <Stack spacing={1} sx={{ mb: 1.5 }}>
-          {ordered.map((h) => {
-            const v = verdicts[h.code];
-            return (
-              <Box
-                key={h.code}
-                sx={{ borderLeft: "3px solid", borderColor: `${VERDICT_COLOR[v.verdict ?? ""] ?? "grey"}.main`, pl: 1.25, fontSize: 13 }}
-              >
-                <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 0.25 }}>
-                  <Typography variant="body2" fontWeight={700}>
-                    {h.name || h.code}
-                  </Typography>
-                  {v.verdict && (
-                    <Chip
-                      label={v.verdict}
-                      size="small"
-                      color={VERDICT_COLOR[v.verdict] ?? "default"}
-                      sx={{ height: 18, fontSize: 11, fontWeight: 700 }}
-                    />
-                  )}
-                  {v.priority != null && sel.length > 1 && (
-                    <Typography variant="caption" color="text.secondary">
-                      处置顺序 #{v.priority}
-                    </Typography>
-                  )}
-                </Stack>
-                {v.trend_t1 && <Box><b>T+1:</b> {v.trend_t1}</Box>}
-                {v.trend_swing && <Box><b>波段:</b> {v.trend_swing}</Box>}
-                {v.take_profit && <Box sx={{ color: "error.main" }}><b>止盈:</b> {v.take_profit}</Box>}
-                {v.stop_loss && <Box sx={{ color: "success.main" }}><b>止损/离场:</b> {v.stop_loss}</Box>}
-              </Box>
-            );
-          })}
-        </Stack>
+      {/* 处置速览:要动的出完整行、持有的折一行;走势散文进 tooltip,别在这平铺 */}
+      {boardRows.length > 0 && (
+        <Box sx={{ mb: 1.5 }}>
+          <HoldingBoard rows={boardRows} scale={0.9} />
+        </Box>
       )}
 
       {!md && !analyzing && (
@@ -230,6 +210,26 @@ export default function HoldingAnalysis({ date, onAnalyzed }: { date: string; on
           多选时还会给处置优先级(先砍谁)与同质化风险。约 1-2 分钟。
         </Typography>
       )}
+
+      {/* 导出预览:按原始 1080 宽渲染(不缩放,否则 html-to-image 出图会变小),窗口不够宽则滚动 */}
+      <Dialog open={posterOpen} onClose={() => setPosterOpen(false)} maxWidth={false}>
+        <DialogContent sx={{ p: 2, bgcolor: "#010409", overflow: "auto" }}>
+          <Box ref={ref} sx={{ width: HOLDING_WIDTH }}>
+            <HoldingPoster date={date} />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPosterOpen(false)}>关闭</Button>
+          <Button
+            variant="contained"
+            onClick={download}
+            disabled={exporting}
+            startIcon={exporting ? <CircularProgress size={14} color="inherit" /> : <ImageIcon />}
+          >
+            下载 PNG
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Box sx={mdSx}>
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>

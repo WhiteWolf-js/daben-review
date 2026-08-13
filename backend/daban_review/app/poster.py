@@ -20,8 +20,9 @@ POSTER_DIR = DATA_DIR / "posters"
 _READY = '[data-poster-root="1"][data-poster-ready="1"]'
 
 
-_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯"}
+_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯", "holding": "持仓处置"}
 # 天梯图首板档要排 8 列,比复盘/竞价海报宽(与 LadderPoster.LADDER_WIDTH 对齐)
+# 持仓处置图 1080 宽(HoldingPoster.HOLDING_WIDTH),默认 1200 视口够用,不必单列
 _KIND_VIEWPORT = {"ladder": 1400}
 
 
@@ -38,7 +39,8 @@ def render_poster(
     """把海报截成 PNG,返回文件路径;失败返回 None。
 
     kind="review" 截复盘海报(?poster=date);kind="auction" 截盘前竞价海报
-    (?poster=date&kind=auction&brief=agent解读);kind="ladder" 截连板天梯图。
+    (?poster=date&kind=auction&brief=agent解读);kind="ladder" 截连板天梯图;
+    kind="holding" 截持仓处置速览图。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -53,8 +55,8 @@ def render_poster(
         from urllib.parse import quote
 
         url += f"&kind=auction&brief={quote(brief)}"
-    elif kind == "ladder":
-        url += "&kind=ladder"
+    elif kind in ("ladder", "holding"):
+        url += f"&kind={kind}"
 
     try:
         with sync_playwright() as p:

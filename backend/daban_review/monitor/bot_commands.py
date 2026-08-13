@@ -33,6 +33,7 @@ HELP = """打板复盘机器人 · 指令
 【交易】
 候选        作战清单(评级 / 进 / 弃)
 持仓        盈亏 + 止盈止损价位
+持仓图      明日处置速览图(要动的排前 + 触发价)
 命中率      候选按评级的滚动胜率与均溢价
 
 【其他】
@@ -49,6 +50,7 @@ _ROUTES: dict[str, tuple[str, ...]] = {
     # 带「图」的先声明:「天梯图」含「天梯」,靠声明序保证图优先命中
     "ladder_image": ("天梯图", "梯队图", "连板图"),
     "auction_image": ("竞价图", "盘前图", "竞价海报"),
+    "holdings_image": ("持仓图", "仓位图", "处置图"),
     "review": ("复盘", "海报", "复盘图", "review", "poster"),
     "auction": ("竞价", "盘前", "抢筹", "auction"),
     "candidates": ("候选", "作战", "作战清单", "打板清单", "cand", "clist"),
@@ -339,6 +341,8 @@ def handle_command(text: str) -> dict:
         return {"kind": "image", "date": resolve_date(date), "which": "auction"}
     if key == "ladder_image":
         return {"kind": "image", "date": resolve_date(date), "which": "ladder"}
+    if key == "holdings_image":
+        return {"kind": "image", "date": resolve_date(date), "which": "holding"}
 
     d = resolve_date(date)
     if key == "review":

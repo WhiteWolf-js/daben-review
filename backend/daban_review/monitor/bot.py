@@ -50,9 +50,21 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
         return
     try:
         # 竞价图不带 agent 解读(with_brief 会调 agent 烧钱);已落库的解读走「竞价」文本指令看
-        path = poster.render_poster(date, kind=which if which in ("auction", "ladder") else "review")
+        kind = which if which in ("auction", "ladder", "holding") else "review"
+        path = poster.render_poster(date, kind=kind)
         if path:
-            send_lark_image(path, target=chat_id)
+            if send_lark_image(path, target=chat_id):
+                return
+            # 图推不出去也别让用户空手 —— 最常见原因是应用缺 im:resource:upload 权限
+            # (发文字的权限和发图的是两套,文字通不代表图能通)。有文本版的就退回文本。
+            log.warning("图片推送失败,退回文本: %s", path)
+            fb = {"holding": bc.fmt_holdings, "ladder": lambda: bc.fmt_ladder(date)}.get(kind)
+            send_lark(
+                f"{fb()}\n\n(图没推成:应用可能缺 im:resource:upload 权限,已退回文本)"
+                if fb
+                else f"{date} 图出好了但推送失败(应用可能缺 im:resource:upload 权限)。图在:{path}",
+                target=chat_id,
+            )
             return
         # 出图失败:分清「没复盘」和「技术故障」,别一律甩锅给没生成
         if which == "review" and not service.get_report(date):
