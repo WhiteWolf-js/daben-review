@@ -232,23 +232,40 @@ class TestPhaseEffects:
         assert r["score"] == 0
         assert r["position"] == "3成"
 
-    def test_tuichao_downgrades_one_level(self):
-        # 退潮:基准 -2,一只强封低位早封票在其他周期本是 A,退潮降为 B
+    def test_tuichao_no_extra_downgrade(self):
+        """退潮**不再在 base 之外额外降级**(原来 base −2 还要再降 1 级)。
+
+        依据 1999 样本 / 28 交易日回测:退潮胜率 53% / 均溢价 +1.16%,逐日 8 天全为正,
+        排中游而非垫底 —— 「照抄市面共识降 1-2 级」把中游周期罚成了最差。
+        风险由仓位(≤1成)控制,不重复罚在评级上。
+        """
         stock = {"seal_strength": 0.05, "first_seal": "", "break_times": 0,
                  "turnover": 10, "boards": 2}
         r = grade_candidate(stock, "退潮")
-        # base -2 +3(超强封) +1(break0) +0(换手10中性) +1(身位) = 3 → A → 降级 B
-        assert r["score"] == 3
-        assert r["grade"] == "B"
+        # base -1 +3(超强封) +1(break0) +0(换手10中性) +1(身位) = 4 → A,不再降到 B
+        assert r["score"] == 4
+        assert r["grade"] == "A"
+        assert r["position"] == "≤1成"  # 仓位仍然压住
+
+    def test_tuichao_base_minus_one(self):
+        # 退潮基准分 -1(原 -2):中性票 score = -1 → C,不再被额外降级成 D
+        r = grade_candidate(self._neutral_stock(), "退潮")
+        assert r["score"] == -1
+        assert r["grade"] == "C"
         assert r["position"] == "≤1成"
 
-    def test_tuichao_downgrade_to_d_forces_avoid(self):
-        # 退潮:本是 C 的票降级为 D,仓位被强制改为回避
-        stock = {"seal_strength": 0.01, "first_seal": "", "break_times": 0,
-                 "turnover": 0, "boards": 4}
-        r = grade_candidate(stock, "退潮")
-        # base -2 +1(中封0.01) +1(break0) +0(换手0) -1(4板) = -1 → C → 降级 D
+    def test_fenqi_base_minus_one(self):
+        """分歧基准分 0 → −1:它是实测最差的周期(50% / +0.81%,中位普遍贴 0)。"""
+        r = grade_candidate(self._neutral_stock(), "分歧")
         assert r["score"] == -1
+        assert r["grade"] == "C"
+        assert r["position"] == "2-3成"
+
+    def test_d_grade_still_forces_avoid(self):
+        # D 类无论周期都回避(这条与退潮降级无关,单独锁住)
+        stock = {"seal_strength": 0.0, "first_seal": "", "break_times": 3,
+                 "turnover": 40, "boards": 6}
+        r = grade_candidate(stock, "退潮")
         assert r["grade"] == "D"
         assert r["position"] == "回避/空仓"
 

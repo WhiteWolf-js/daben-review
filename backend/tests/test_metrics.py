@@ -138,9 +138,11 @@ class TestComputeEmotion:
         assert m["market_state_hint"].startswith("震荡抱团")
 
     def test_phase_tuichao(self):
-        # money_effect<0 且 break_rate>=0.4 → 退潮
+        # 亏钱(强信号)+ 炸板率高(弱信号)→ 退潮
+        # **最高板要 >2**:否则 1 板 + 亏钱 + 涨停≤30 同时满足冰点,而冰点判在退潮之前
+        # (冰点是退潮之后的终态,那种盘面叫冰点更准)。真实退潮日高度都还在:0707 最高 6 板。
         pools = {
-            "limitup": pd.DataFrame([{"code": "A", "boards": 1, "industry": "X"}]),
+            "limitup": pd.DataFrame([{"code": "A", "boards": 3, "industry": "X"}]),
             "previous": pd.DataFrame([{"code": "P", "prev_boards": 1, "pct": -5.0}]),
             "zbgc": pd.DataFrame([{"code": "Z1"}, {"code": "Z2"}, {"code": "Z3"}]),
             "dtgc": pd.DataFrame(),
@@ -163,6 +165,79 @@ class TestComputeEmotion:
         }
         m = compute_emotion(pools)
         assert m["phase_hint"] == "冰点"
+
+
+def _counts(zt=10, dt=0, zbgc=0, max_board=1, prev_n=10, promoted=0, me=0.0):
+    """按「家数」造池子:周期判据只吃这些聚合量,不必造真实字段。
+
+    promoted 只只出现在涨停池里 → 命中晋级;previous 每行 pct 都取 me → 均值就是 me。
+    """
+    limitup = pd.DataFrame(
+        [{"code": f"L{i}", "boards": 1, "industry": "X"} for i in range(max(zt - 1, 0))]
+        + ([{"code": "LH", "boards": max_board, "industry": "X"}] if zt else [])
+    )
+    prev = [{"code": f"L{i}" if i < promoted else f"P{i}", "prev_boards": 1, "pct": me}
+            for i in range(prev_n)]
+    return {
+        "limitup": limitup,
+        "previous": pd.DataFrame(prev),
+        "zbgc": pd.DataFrame([{"code": f"Z{i}"} for i in range(zbgc)]),
+        "dtgc": pd.DataFrame([{"code": f"D{i}"} for i in range(dt)]),
+    }
+
+
+class TestPhaseHintRealDays:
+    """用真实交易日的家数锁住周期判据 —— 这几天正是改判据的动因。
+
+    判据是「强信号(亏钱 / 跌停涌现)+ 弱信号(封不住 / 接力断)」:
+    退潮要 2 强或 1 强 1 弱,只有弱信号是分歧。改阈值前先让这组用例过。
+    """
+
+    def test_0728_tuichao_not_xiufu(self):
+        """0728 赚钱效应还是 +0.6%,但跌停 49/涨停 61=0.80、总晋级 14.4% → 退潮。
+
+        老判据 `me>0 → 修复` 把这天判成「修复」,会同时污染当晚复盘的周期定位
+        和回测按周期分层的口径(退潮在 score.py 里是 base−2 + 全线降级)。
+        """
+        m = compute_emotion(_counts(zt=61, dt=49, zbgc=20, max_board=6,
+                                    prev_n=7, promoted=1, me=0.60))
+        assert m["dt_count"] == 49
+        assert round(m["break_rate"], 3) == 0.247
+        assert m["phase_hint"] == "退潮"
+
+    def test_0710_fenqi_not_tuichao(self):
+        """0710 炸板率 49.7% 很难看,但跌停只有 4 家、赚钱 +0.68 —— 钱还在场里打 → 分歧。"""
+        m = compute_emotion(_counts(zt=92, dt=4, zbgc=91, max_board=2,
+                                    prev_n=100, promoted=13, me=0.68))
+        assert m["phase_hint"] == "分歧"
+
+    def test_0721_xiufu_low_promo_but_sealed_tight(self):
+        """0721 涨停 121、炸板率仅 6.2%、赚钱 +1.36 → 修复。
+
+        总晋级 9.4% 低只是因为首板基数大,不是恶化 —— 故晋级率信号必须配合封板质量差。
+        """
+        m = compute_emotion(_counts(zt=121, dt=21, zbgc=8, max_board=4,
+                                    prev_n=100, promoted=9, me=1.36))
+        assert m["phase_hint"] == "修复"
+
+    def test_zero_axis_money_effect_is_not_xiufu(self):
+        """0729 赚钱效应 +0.65 贴着零轴 → 分歧。老判据 `me>0` 太松,一个月能判出 14 天修复。"""
+        m = compute_emotion(_counts(zt=81, dt=9, zbgc=14, max_board=7,
+                                    prev_n=100, promoted=18, me=0.65))
+        assert m["phase_hint"] == "分歧"
+
+    def test_0730_many_limitdown_kills_xiufu(self):
+        """0730 跌停 38/涨停 52=0.73:跌停逼近涨停本身就是强信号,赚钱为正也不算修复。"""
+        m = compute_emotion(_counts(zt=52, dt=38, zbgc=18, max_board=8,
+                                    prev_n=100, promoted=15, me=0.29))
+        assert m["phase_hint"] == "分歧"
+
+    def test_gaochao_needs_clean_tape(self):
+        """带着一堆跌停的普涨顶不是高潮:同样的高度+赚钱,跌停多就降到退潮。"""
+        clean = _counts(zt=111, dt=6, zbgc=13, max_board=5, prev_n=100, promoted=20, me=3.25)
+        assert compute_emotion(clean)["phase_hint"] == "高潮"  # 0727 实况
+        dirty = _counts(zt=111, dt=70, zbgc=13, max_board=5, prev_n=100, promoted=20, me=3.25)
+        assert compute_emotion(dirty)["phase_hint"] != "高潮"
 
 
 # ---------------------------------------------------------------------------

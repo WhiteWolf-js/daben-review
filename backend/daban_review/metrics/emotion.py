@@ -87,20 +87,71 @@ def _promotion(previous: pd.DataFrame, limitup: pd.DataFrame) -> dict:
     }
 
 
+# 恶化信号阈值。跌停用「跌停/涨停」比值而不是绝对数 —— 绝对数受市况基数影响没法跨日比
+# (0728 跌停 49 / 涨停 61 = 0.80,前一日 6 / 111 = 0.05,比值一眼看出恶化)
+_DT_RATIO_BAD = 0.5
+_BREAK_RATE_BAD = 0.35
+_PROMO_BAD = 0.15
+# 晋级率低必须配合封板质量差才算恶化:涨停家数一多,首板占比高,总晋级率会被基数天然拉低
+# (实测 0721 涨停 121、炸板率仅 6.2%、赚钱 +1.36,总晋级 9.4% —— 封得极死,不是恶化)
+_PROMO_BREAK_MIN = 0.20
+
+
+def _dt_ratio(m: dict) -> float:
+    """跌停/涨停。涨停为 0 时:有跌停算最坏(1.0),都没有算 0。"""
+    zt, dt = m["zt_count"], m["dt_count"]
+    return dt / zt if zt else (1.0 if dt else 0.0)
+
+
+def _bad_signals(m: dict) -> tuple[int, int]:
+    """恶化信号 →(强, 弱)。
+
+    **强弱要分开**:「钱在亏 / 跌停涌现」是资金真的在离场;「炸板率高 / 接力断」只是封板
+    质量差,钱可能还在场内。早期版本简单计数 `bad>=2` 就判退潮,结果 0710(涨停 92、
+    跌停 4、炸板 49.7%)、0722(涨停 47、跌停 8)都被误判成退潮 —— 它们其实是分歧;
+    而且炸板率高与晋级率低本身高度相关,计数等于把同一个现象数了两次。
+    """
+    me = m["money_effect"]
+    po = m.get("promo_overall")
+    br = m["break_rate"]
+    strong = sum([
+        me is not None and me < 0,        # 昨日涨停股今日平均亏钱
+        _dt_ratio(m) >= _DT_RATIO_BAD,    # 跌停家数逼近涨停家数
+    ])
+    weak = sum([
+        br >= _BREAK_RATE_BAD,                                        # 封不住
+        po is not None and po < _PROMO_BAD and br >= _PROMO_BREAK_MIN,  # 接力断且封板质量差
+    ])
+    return strong, weak
+
+
 def _phase_hint(m: dict) -> str:
-    """情绪周期单日粗判(冰点/修复/发酵/高潮/退潮/分歧)。仅供 agent 参考。"""
+    """情绪周期单日粗判(冰点/修复/发酵/高潮/退潮/分歧)。仅供 agent 参考。
+
+    判据顺序:未知 → 高潮/冰点(两端极值)→ 恶化计数 → 发酵/修复 → 分歧兜底。
+    **改这里必须同步核对 `metrics/score.py` 的按周期加减分与回测分层口径**(两者同口径)。
+    """
     me = m["money_effect"]
     if me is None:
         return "未知"
-    if m["max_board"] >= 5 and me > 3 and m["zt_count"] >= 50:  # 涨停≥50家(对齐 SkillHub;60 在缩量市几乎不触发)
+    strong, weak = _bad_signals(m)
+    zt = m["zt_count"]
+    dt_ratio = _dt_ratio(m)
+
+    # 高潮:高度 + 强赚钱 + 面广,且**一个恶化信号都没有**(涨停≥50 对齐 SkillHub;
+    # 60 在缩量市几乎不触发)。带着一堆跌停的普涨顶不是高潮
+    if m["max_board"] >= 5 and me > 3 and zt >= 50 and strong + weak == 0:
         return "高潮"
-    if me < 0 and m["break_rate"] >= 0.4:
-        return "退潮"
-    if m["zt_count"] <= 30 and m["max_board"] <= 2 and me < 0:
+    if zt <= 30 and m["max_board"] <= 2 and me < 0:
         return "冰点"
-    if me > 2 and (m.get("promo_high") or 0) and (m["promo_high"] or 0) >= 0.4:
+    # 退潮要有「资金离场」的硬证据:两个强信号,或一强带一弱。
+    # 只有弱信号(封不住、接力差)是分歧不是退潮 —— 钱还在场里打,只是打得难看
+    if strong >= 2 or (strong >= 1 and weak >= 1):
+        return "退潮"
+    if me > 2 and (m.get("promo_high") or 0) >= 0.4:
         return "发酵"
-    if me > 0:
+    # 修复要求确实在赚钱:+0.6% 贴着零轴不算修复,老判据 `me>0` 太松
+    if me >= 1 and strong + weak == 0 and dt_ratio < 0.3:
         return "修复"
     return "分歧"
 
