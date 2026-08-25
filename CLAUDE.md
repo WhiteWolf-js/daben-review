@@ -156,6 +156,15 @@ data/                  SQLite 库 + posters/ + logs/
   别退回逐只跑。一次分析产出**一篇** markdown,`_save_holding_analysis` 给参与的每只各存一行
   (markdown 重复、verdict 按 code 各取自己那项),这样 HoldingsList 的读取逻辑不用变。
   接口 `POST /api/holdings/analyze` 收 `codes: list[str]`,同时兼容老的单个 `code`。
+- **改完海报组件必须 `npm run build`,否则飞书推的还是旧图**:后端 `poster.py` 用 Playwright 截的是
+  `POSTER_BASE_URL`(默认 `127.0.0.1:8000`)—— `main.py` 把 **`frontend/dist` 构建产物**挂在 `/` 上,
+  **不是** vite dev server 的 :5173。所以网页上看着已经改好、飞书推出来还是老样子。
+  涉及的文件:`PosterView / LadderPoster / AuctionPoster / HoldingPoster` 以及它们共用的
+  `LadderGrid / HoldingBoard`。自检:`PYTHONPATH=. python3 -c "from daban_review.app import poster;
+  print(poster.render_poster('<date>', kind='holding'))"` 然后看 `data/posters/` 里那张图。
+- **海报与网页面板共用一份排版**(`LadderGrid`、`HoldingBoard`):别写两套,改一处就好。
+  海报侧没有 tooltip 兜底 —— 面板上截断后能 hover 看全的字段(如持仓触发价),海报上必须给够行数,
+  否则信息永久丢失。
 - ECharts 在 MUI Dialog 里用**原生 echarts** 手动 `init/setOption/resize`,`echarts-for-react` 会 stale 只画左半。
 - 通达信协议偶发浮点垃圾(`5.87e-39`),量能一律 `<1e-6` 归零。
 - 前端 MUI v7 + emotion,样式用 `sx`,不新增 `.scss`。
@@ -169,4 +178,5 @@ data/                  SQLite 库 + posters/ + logs/
 
 后端改动:`PYTHONPATH=. python3 -m pytest tests/ -v` + `launchctl kickstart -k` 后 `tail data/logs/backend.log` 无异常。
 前端改动:`npx tsc -b --noEmit`(或 `npm run build`)+ 浏览器实看 :5173。
+**动了海报组件**:额外 `npm run build`,再让后端出一次图核对(见上方约定),否则飞书还是旧图。
 失败就贴输出说失败,不假装通过。
