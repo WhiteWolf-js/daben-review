@@ -199,7 +199,7 @@ def get_candidate_pool(date: str, grades: tuple[str, ...] = _POOL_GRADES) -> dic
 
     keep = {"code", "name", "boards", "grade", "score", "position", "rank", "price",
             "seal_strength", "turnover", "break_times", "first_seal", "last_seal",
-            "theme_rank", "w2s", "reasons"}
+            "theme_rank", "w2s", "passive", "reasons"}
     out: dict[str, list[dict]] = {}
     for style, items in built.get("pool", {}).items():
         out[style] = [
@@ -290,11 +290,20 @@ def save_report(date: str, markdown: str) -> None:
     pools = load_pools(date)
     emotion = compute_emotion(pools)
     phase = emotion.get("phase_hint", "未知")
-    # 标弱转强(昨炸板今涨停)——必须与候选池/回测同口径,否则同一只票两处分级会不一致
+    # 标弱转强 + 被动上板度 —— 必须与候选池/回测同口径,否则同一只票两处分级会不一致
     prev_zb = store.prev_zbgc_codes(date)
+    _profs = stock_profiles(pools["limitup"])
+    try:
+        from ..metrics import theme_heat
+        from ..metrics.ladder import passive_map
+        _th = ak.ths_limitup_reasons(date)
+        _pv = passive_map(_profs, _th, [t["theme"] for t in theme_heat(pools, _th, top=9999)])
+    except Exception as e:  # noqa: BLE001 题材拉不到只是少这个因子,不该阻塞报告落库
+        log.warning("被动上板度计算跳过(%s)", e)
+        _pv = {}
     profiles = {
-        p["code"]: {**p, "w2s": p["code"] in prev_zb}
-        for p in stock_profiles(pools["limitup"])
+        p["code"]: {**p, "w2s": p["code"] in prev_zb, "passive": _pv.get(p["code"])}
+        for p in _profs
     }
 
     conn.execute(
@@ -340,8 +349,9 @@ def save_report(date: str, markdown: str) -> None:
 def candidate_outcome(code: str, base_date: str) -> dict | None:
     """候选次日验证:隔日溢价 = 次日开盘/当日收盘(涨停价)−1。
 
-    次日尚未收盘或无日线数据返回 None(留待下次再算)。close_prem 为次日收盘溢价(辅助)。
+    次日尚未开盘返回 None。close_prem 仅次日 15:00 后才填入，盘中返回 None 避免锁入脏数据。
     """
+    import datetime as _dt
     from ..data.akshare_client import daily_bars
 
     try:
@@ -353,16 +363,22 @@ def candidate_outcome(code: str, base_date: str) -> dict | None:
     d = d.reset_index(drop=True)
     idx = d.index[d["date"] == base_date]
     if not len(idx) or idx[0] + 1 >= len(d):
-        return None  # 次日未收盘
+        return None
     i = idx[0]
     base_close = float(d.iloc[i]["close"])
     if base_close <= 0:
         return None
     nxt = d.iloc[i + 1]
+    next_date = str(nxt["date"])
+    today = _dt.date.today().strftime("%Y%m%d")
+    now = _dt.datetime.now()
+    next_closed = next_date < today or (
+        next_date == today and now.hour * 60 + now.minute >= 15 * 60
+    )
     return {
-        "next_date": str(nxt["date"]),
+        "next_date": next_date,
         "open_prem": round(float(nxt["open"]) / base_close - 1, 4),
-        "close_prem": round(float(nxt["close"]) / base_close - 1, 4),
+        "close_prem": round(float(nxt["close"]) / base_close - 1, 4) if next_closed else None,
     }
 
 
@@ -386,6 +402,14 @@ def get_candidates(date: str) -> list[dict]:
                 conn.execute(
                     "UPDATE candidates SET next_date=?, open_prem=?, close_prem=? WHERE rowid=?",
                     (next_date, open_prem, close_prem, rowid),
+                )
+        elif close_prem is None and next_date:  # open_prem 已有但 close_prem 未落（盘中写的）→ 补算
+            oc = candidate_outcome(r[2], date)
+            if oc and oc["close_prem"] is not None:
+                close_prem = oc["close_prem"]
+                conn.execute(
+                    "UPDATE candidates SET close_prem=? WHERE rowid=?",
+                    (close_prem, rowid),
                 )
         out.append({
             "style": r[1], "code": r[2], "name": r[3], "trigger": r[4], "giveup": r[5], "reason": r[6],
@@ -600,6 +624,7 @@ def get_auction_live() -> dict:
     from ..data import akshare_client as ak
     from ..metrics import auction_live as al
     from ..metrics import compute_emotion
+    from ..metrics import theme_heat as al_theme_heat
     from ..metrics.ladder import stock_profiles
     from ..metrics.score import grade_candidate
 
@@ -612,9 +637,16 @@ def get_auction_live() -> dict:
                 "note": "库里没有历史涨停池,先复盘一天再用"}
 
     pools = load_pools(prev)
-    # 竞价台的底分是「昨日画像分」,弱转强要按**昨日**那天的前一交易日算
+    # 竞价台的底分是「昨日画像分」,弱转强与被动上板度都要按**昨日**那天算
     prev_zb = store.prev_zbgc_codes(prev)
-    profiles = [{**p, "w2s": p["code"] in prev_zb} for p in stock_profiles(pools["limitup"])]
+    _profs = stock_profiles(pools["limitup"])
+    try:
+        from ..metrics.ladder import passive_map
+        _th_prev = ak.ths_limitup_reasons(prev)
+        _pv = passive_map(_profs, _th_prev, [t["theme"] for t in al_theme_heat(pools, _th_prev, top=9999)])
+    except Exception:  # noqa: BLE001
+        _pv = {}
+    profiles = [{**p, "w2s": p["code"] in prev_zb, "passive": _pv.get(p["code"])} for p in _profs]
     pool = al.pick_pool(profiles)
     quotes = ak.realtime_quotes([p["code"] for p in pool])
 
