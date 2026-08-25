@@ -333,3 +333,40 @@ class TestRobustness:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class TestPassive:
+    """被动上板(同题材封板次序)。回测 704 只可判样本:领头档 72.8%/+3.16%、
+    垫底档 49.2%/+0.33%,r=-0.327(目前最强单因子,控制封板时刻后仍成立)。"""
+
+    _BASE = {"seal_strength": 0.005, "first_seal": "103000", "last_seal": "103000",
+             "break_times": 0, "turnover": 10, "boards": 1}
+
+    def _s(self, **kw):
+        return grade_candidate({**self._BASE, **kw}, "未知")
+
+    def test_leader_plus_two(self):
+        assert self._s(passive=0.0)["score"] - self._s()["score"] == 2
+        assert any("题材领头" in x for x in self._s(passive=0.0)["reasons"])
+
+    def test_laggard_minus_one(self):
+        assert self._s()["score"] - self._s(passive=1.0)["score"] == 1
+        assert any("被动上板" in x for x in self._s(passive=1.0)["reasons"])
+
+    def test_middle_neutral(self):
+        """0.25–0.75 中间两档回测无区分(55-59% / +0.8~1.0%),必须不加不减。"""
+        for v in (0.26, 0.5, 0.75):
+            assert self._s(passive=v)["score"] == self._s()["score"], v
+
+    def test_boundaries_inclusive(self):
+        assert self._s(passive=0.25)["score"] - self._s()["score"] == 2   # ≤0.25 领头
+        assert self._s(passive=0.751)["score"] - self._s()["score"] == -1  # >0.75 垫底
+
+    def test_none_gives_nothing(self):
+        """同题材不足 3 只 → passive 为 None(次序无意义),不加不减。"""
+        assert self._s(passive=None)["score"] == self._s()["score"]
+
+    def test_zero_is_not_treated_as_missing(self):
+        """0.0 是「该题材第一个封板」= 最该加分的情形,**不能被当成缺失**
+        (`if passive:` 会把 0.0 当假,必须用 `is not None`)。"""
+        assert self._s(passive=0.0)["score"] > self._s()["score"]

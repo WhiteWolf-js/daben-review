@@ -143,6 +143,21 @@ def grade_candidate(stock: dict, phase_hint: str) -> dict:
         score += 2
         reasons.append("弱转强(昨炸板今涨停)")
 
+    # 被动上板(同题材封板次序,0=该题材第一个封 / 1=最后被推上去)。判据与回测见
+    # ladder.passive_map。本地回测 704 只可判样本:最早封档 72.8%/+3.16%、
+    # 最后封档 49.2%/+0.33%,r=-0.327 —— 目前最强单因子,且控制封板时刻后仍成立。
+    # 领头 +2(与超早封同档);垫底 -1 而非 -2:胜率虽跌破 50%,但均溢价还是正的
+    # (+0.33%),不像 last_seal ≥14:00 那样转负。
+    # 同题材不足 3 只时 passive 为 None(次序无意义)→ 不加不减。
+    passive = stock.get("passive")
+    if passive is not None:
+        if passive <= 0.25:
+            score += 2
+            reasons.append("题材领头(同题材最早封板)")
+        elif passive > 0.75:
+            score -= 1
+            reasons.append("被动上板(同题材最后才封)")
+
     if score >= 4:
         grade = "A+"
     elif score >= 2:

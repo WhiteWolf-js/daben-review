@@ -13,8 +13,9 @@ from typing import Callable
 from ..data import akshare_client as ak
 from ..data import fetch, store
 from .emotion import compute_emotion
-from .ladder import stock_profiles
+from .ladder import passive_map, stock_profiles
 from .score import _first_seal_minutes, grade_candidate
+from .sector import theme_heat
 
 
 def _open_prem(df, base_date: str) -> float | None:
@@ -72,17 +73,26 @@ def collect(dates: list[str] | None = None,
         phase = compute_emotion(pools).get("phase_hint", "未知")
         di = all_dates.index(date)
         prev_zb = zb_by_date.get(all_dates[di - 1], set()) if di > 0 else set()
-        for p in stock_profiles(pools["limitup"]):
+        # 被动上板度需要题材(每日一次网络请求);拉不到就整天没有这个因子,不阻断回测
+        profs = stock_profiles(pools["limitup"])
+        try:
+            th = ak.ths_limitup_reasons(date)
+            passive = passive_map(profs, th, [t["theme"] for t in theme_heat(pools, th, top=9999)])
+        except Exception:  # noqa: BLE001
+            passive = {}
+        for p in profs:
             prem = _open_prem(bars(p["code"]), date)
             if prem is None:
                 continue
             w2s = p["code"] in prev_zb
-            g = grade_candidate({**p, "w2s": w2s}, phase)
+            pv = passive.get(p["code"])
+            g = grade_candidate({**p, "w2s": w2s, "passive": pv}, phase)
             rows.append({
                 "date": date, "code": p["code"], "grade": g["grade"], "score": g["score"],
                 "seal": float(p["seal_strength"] or 0), "fmin": _first_seal_minutes(p["first_seal"]),
                 "breaks": int(p["break_times"] or 0), "turn": float(p["turnover"] or 0),
-                "boards": int(p["boards"] or 0), "w2s": w2s, "phase": phase, "prem": prem,
+                "boards": int(p["boards"] or 0), "w2s": w2s, "passive": pv,
+                "phase": phase, "prem": prem,
             })
     conn.close()
     return rows
@@ -139,8 +149,8 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 def summarize(rows: list[dict]) -> dict:
     """结构化汇总:by_grade / by_phase / by_boards / by_w2s / corr。供程序化使用或渲染。
 
-    by_w2s 单列出来是为了**每次回测都复核弱转强这个因子** —— 它进 score.py 时只有
-    n=27(p=0.0136),偏薄;样本随交易日累积,不单列就没人会去看它是否还成立。
+    by_w2s / by_passive 单列出来是为了**每次回测都复核这两个新因子** —— 它们进 score.py 时
+    样本都不厚,不单列就没人会去看是否还成立。
     对照组要用「同板位」而不是全样本:弱转强票几乎全是首板(26/27)。
     """
     def by(key: str, values) -> dict:
@@ -162,6 +172,18 @@ def summarize(rows: list[dict]) -> dict:
             k: a for k, a in (
                 ("弱转强", agg([r for r in rows if r.get("w2s")])),
                 ("1板对照", agg([r for r in rows if not r.get("w2s") and r["boards"] == 1])),
+            ) if a
+        },
+        # 被动上板度分档(同题材封板次序)。只统计可判的(同题材 ≥3 只)
+        "by_passive": {
+            k: a for k, a in (
+                ("领头 ≤0.25", agg([r for r in rows if (r.get("passive") or 1) <= 0.25
+                                    and r.get("passive") is not None])),
+                ("0.25–0.75", agg([r for r in rows if r.get("passive") is not None
+                                   and 0.25 < r["passive"] <= 0.75])),
+                ("垫底 >0.75", agg([r for r in rows if r.get("passive") is not None
+                                   and r["passive"] > 0.75])),
+                ("不可判", agg([r for r in rows if r.get("passive") is None])),
             ) if a
         },
         "pearson": pearson(xs, ys),
@@ -204,6 +226,16 @@ def format_report(rows: list[dict]) -> str:
         w = s["by_w2s"].get("弱转强")
         if w and w["n"] < 40:
             out.append(f"  ⚠️ 样本仅 {w['n']} 条,进 score.py 时是 27 条(p=0.0136),攒到 ~40 条再复核阈值")
+
+    if s["by_passive"]:
+        out.append("\n被动上板(同题材封板次序,0=该题材第一个封 / 1=最后被推上去):")
+        out.append(f"  {'':<10}{'n':>6}{'胜率':>8}{'平均溢价':>10}{'中位':>9}")
+        for k, a in s["by_passive"].items():
+            out.append(line(k, a))
+        pv = [r["passive"] for r in rows if r.get("passive") is not None]
+        if pv:
+            pp = [r["prem"] for r in rows if r.get("passive") is not None]
+            out.append(f"  被动度 ↔ 溢价 r={pearson(pv, pp):+.3f}(进 score.py 时 -0.327,n=704)")
 
     out.append(f"\nscore ↔ 隔日溢价:  Pearson={s['pearson']:+.3f}   Spearman={s['spearman']:+.3f}")
     return "\n".join(out)

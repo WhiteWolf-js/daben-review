@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .ladder import stock_profiles
+from .ladder import passive_map, stock_profiles
 from .score import _first_seal_minutes, grade_candidate
+from .sector import theme_heat
 
 # 与 service.CANDIDATE_STYLES 同名同序(前端展示顺序也依赖它)
 STYLES = ["低位连板接力", "首板打板", "题材情绪龙头", "高位龙头接力"]
@@ -87,6 +88,8 @@ def build_candidate_pool(
     prev_zbgc: 前一交易日炸板池代码集(`store.prev_zbgc_codes`),用于标「弱转强」给 score 加分;
       不传就没这份加分(与 score.grade_candidate 的可选 `w2s` 约定一致)
 
+    「被动上板度」(passive)不用额外传参 —— 由 themes 内部算(见 ladder.passive_map)。
+
     返回 {"phase": ..., "theme_top": [...], "pool": {style: [item...]}},
     item 含打分因子原值 + score/grade/position/reasons + rank + price(涨停价,供触发价算式)。
     """
@@ -102,8 +105,11 @@ def build_candidate_pool(
     # 全池打分(纯规则,与次日验证同口径)
     scored: list[dict] = []
     zb = prev_zbgc or set()
-    for p in stock_profiles(lim):
-        p = {**p, "w2s": p["code"] in zb}  # 弱转强:昨炸板今涨停
+    profs = stock_profiles(lim)
+    # 被动上板度:用**全部 ≥2 只**的题材(不是 theme_rank 用的 top12),与回测口径一致
+    passive = passive_map(profs, themes, [t["theme"] for t in theme_heat(pools, themes, top=9999)])
+    for p in profs:
+        p = {**p, "w2s": p["code"] in zb, "passive": passive.get(p["code"])}
         g = grade_candidate(p, phase)
         my_themes = themes.get(p["code"], [])
         scored.append({

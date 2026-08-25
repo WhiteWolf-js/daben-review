@@ -93,6 +93,60 @@ def _limit_pct(code: str) -> float:
     return 10.0      # 沪深主板(含 ST)
 
 
+PASSIVE_MIN_PEERS = 3  # 同题材不足这么多只,封板次序没有意义 → 不给被动度
+
+
+def passive_map(
+    profiles: list[dict],
+    themes: dict[str, list[str]] | None,
+    hot_themes: list[str] | None,
+    min_peers: int = PASSIVE_MIN_PEERS,
+) -> dict[str, float]:
+    """code → **被动上板度** 0~1:它在同题材里第几个封板(0=第一个封,1=最后被推上去)。
+
+    量化的是复盘里那句「尾盘被板块反推上板,属于悟道板,预期不好」/「缺乏主动性」——
+    区分**它带动板块**还是**板块推它上板**。
+
+    本地回测 22 交易日、704 只可判样本(需同题材 ≥min_peers 只):
+      0–0.25 最早封 n=217 胜72.8% 均+3.16%
+      0.25–0.5      n=181 胜55.2% 均+0.97%
+      0.5–0.75      n=115 胜59.1% 均+0.77%
+      0.75–1.0 最后 n=191 胜49.2% 均+0.33%
+    相关性 r=-0.327,**强于 last_seal(-0.270)与封流比**,是目前测过最强的单因子。
+    且不是 last_seal 的马甲:只看封板时刻在中性档(9:45–14:00)的票,最早封仍
+    65.0%/+1.75% vs 最后封 59.0%/+0.96% —— 同一时段封板,谁是本题材领头很关键。
+
+    ⚠️ 三处口径必须与回测一致,改了分数就与验证脱钩:
+    1. hot_themes 用**全部 ≥2 只**的题材(theme_heat(top=9999)),不是面板的 top12
+    2. 一只票多题材时取 **hot_themes 里靠前的**(即当日涨停家数最多的那个)——
+       这里要的是「同伴最多的那条线」,与天梯 chip 同规则,但**不同于**候选池 link 的
+       「身位最强」口径(那个服务于另一个问题)
+    3. 排序用**最终封板** last_seal(缺失退回 first_seal);同题材按此排序取相对次序
+    """
+    rank = {t: i for i, t in enumerate(hot_themes or [])}
+    tm = themes or {}
+    pick: dict[str, str] = {}
+    for p in profiles:
+        ts = [t for t in (tm.get(p["code"]) or []) if t in rank]
+        if ts:
+            pick[p["code"]] = min(ts, key=lambda t: rank[t])
+
+    groups: dict[str, list[dict]] = {}
+    for p in profiles:
+        t = pick.get(p["code"])
+        if t:
+            groups.setdefault(t, []).append(p)
+
+    out: dict[str, float] = {}
+    for ps in groups.values():
+        if len(ps) < min_peers:
+            continue
+        ps = sorted(ps, key=lambda x: _seal_minutes(x.get("last_seal") or x.get("first_seal")) or 9999)
+        for i, p in enumerate(ps):
+            out[p["code"]] = round(i / (len(ps) - 1), 3)
+    return out
+
+
 _SW_SUFFIX = re.compile(r"[ⅠⅡⅢⅣ]+$")
 
 
