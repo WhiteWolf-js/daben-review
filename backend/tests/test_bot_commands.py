@@ -22,6 +22,7 @@ class TestParse:
         ("竞价", "auction"), ("盘前", "auction"),
         ("竞价图", "auction_image"), ("盘前图", "auction_image"),
         ("天梯图", "ladder_image"), ("连板图", "ladder_image"),
+        ("复盘长图", "report_image"), ("长图", "report_image"), ("正文图", "report_image"),
         ("题材", "theme"), ("板块", "theme"),
         ("天梯", "ladder"), ("梯队", "ladder"),
         ("命中率", "stats"), ("回测", "stats"),
@@ -57,6 +58,12 @@ class TestParse:
         assert bc.parse("竞价图")[0] == "auction_image"
         assert bc.parse("天梯图")[0] == "ladder_image"
         assert bc.parse("天梯")[0] == "ladder"  # 不带图仍走文本
+
+    def test_long_image_wins_over_review_poster(self):
+        """「复盘长图」含「复盘」,声明序必须让长图先命中 —— 这处最容易被后人改坏。"""
+        assert bc.parse("复盘长图")[0] == "report_image"
+        assert bc.parse("发一张今天的复盘长图")[0] == "report_image"
+        assert bc.parse("复盘")[0] == "review"  # 不带长图仍是摘要海报
 
     def test_date_extracted_and_stripped(self):
         # 日期被摘出后,剩下的词仍要能命中指令
@@ -186,6 +193,23 @@ class TestFmtNewPanels:
         out = bc.fmt_theme("20260727")
         assert "储能" in out and "+3.28%" in out
         assert "央企" in out and "—" in out  # 未匹配到板块要显示占位
+
+    def test_report_text_strips_json_block(self, monkeypatch):
+        """长图推送失败时的兜底:正文照发,但尾部给系统解析的 ```json 不能进消息。"""
+        from daban_review.app import service
+
+        monkeypatch.setattr(service, "get_report", lambda d: {
+            "markdown": '## 一、数据基础\n涨停89家\n\n```json\n[{"code":"000001"}]\n```\n',
+        })
+        out = bc.fmt_report_text("20260916")
+        assert "涨停89家" in out
+        assert "json" not in out and "000001" not in out
+
+    def test_report_text_empty(self, monkeypatch):
+        from daban_review.app import service
+
+        monkeypatch.setattr(service, "get_report", lambda d: None)
+        assert "还没有复盘正文" in bc.fmt_report_text("20260101")
 
     def test_theme_empty(self, monkeypatch):
         from daban_review.app import service
@@ -318,6 +342,8 @@ class TestHandleCommand:
         monkeypatch.setattr(bc, "resolve_date", lambda d=None, **k: "20260728")
         assert bc.handle_command("竞价图")["which"] == "auction"
         assert bc.handle_command("天梯图")["which"] == "ladder"
+        assert bc.handle_command("持仓图")["which"] == "holding"
+        assert bc.handle_command("长图")["which"] == "report"
 
     def test_ask_carries_question_and_date(self, monkeypatch):
         monkeypatch.setattr(bc, "resolve_date", lambda d=None, **k: "20260727")

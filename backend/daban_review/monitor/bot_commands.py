@@ -21,6 +21,7 @@ HELP = """打板复盘机器人 · 指令
 
 【图】
 复盘        今日复盘海报(可加日期:复盘 20260723)
+复盘长图    整篇复盘正文长图(五段结构化图示)
 天梯图      连板天梯(按板级 + 断板划线 + 行业分布)
 竞价图      盘前竞价决策图
 
@@ -51,6 +52,8 @@ _ROUTES: dict[str, tuple[str, ...]] = {
     "ladder_image": ("天梯图", "梯队图", "连板图"),
     "auction_image": ("竞价图", "盘前图", "竞价海报"),
     "holdings_image": ("持仓图", "仓位图", "处置图"),
+    # 「复盘长图」含「复盘」→ 必须排在 review 之前,否则被摘要海报截胡
+    "report_image": ("复盘长图", "长图", "正文图", "全文图", "复盘正文"),
     "review": ("复盘", "海报", "复盘图", "review", "poster"),
     "auction": ("竞价", "盘前", "抢筹", "auction"),
     "candidates": ("候选", "作战", "作战清单", "打板清单", "cand", "clist"),
@@ -289,6 +292,19 @@ def fmt_holdings() -> str:
     return "\n".join(out)
 
 
+def fmt_report_text(date: str) -> str:
+    """复盘正文纯文本(剥掉尾部给系统解析的 ```json)。
+
+    只作长图推送失败时的兜底 —— 长图的内容本身就是文字,退回文本真能用,
+    比回一句「出图失败」强。正文本身有几千字,不当常规指令暴露(手机上刷不完)。
+    """
+    from ..app import service
+
+    md = (service.get_report(date) or {}).get("markdown") or ""
+    clean = re.sub(r"```json\s*.*?```", "", md, flags=re.S).strip()
+    return clean or f"{date} 还没有复盘正文。"
+
+
 def fmt_stats() -> str:
     from ..app import service
 
@@ -319,7 +335,7 @@ def fmt_cost() -> str:
 def handle_command(text: str) -> dict:
     """文本 → 动作。返回:
     {kind:"text", content}
-    {kind:"image", date, which:"review"|"auction"}
+    {kind:"image", date, which:"review"|"report"|"auction"|"ladder"|"holding"}
     {kind:"ask", question, date}
     """
     key, date, question = parse(text)
@@ -347,6 +363,8 @@ def handle_command(text: str) -> dict:
     d = resolve_date(date)
     if key == "review":
         return {"kind": "image", "date": d, "which": "review"}
+    if key == "report_image":
+        return {"kind": "image", "date": d, "which": "report"}
     if key == "candidates":
         return {"kind": "text", "content": fmt_candidates(d)}
     if key == "emotion":

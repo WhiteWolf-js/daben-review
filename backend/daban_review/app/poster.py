@@ -20,10 +20,14 @@ POSTER_DIR = DATA_DIR / "posters"
 _READY = '[data-poster-root="1"][data-poster-ready="1"]'
 
 
-_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯", "holding": "持仓处置"}
+_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯",
+              "holding": "持仓处置", "report": "复盘正文"}
 # 天梯图首板档要排 8 列,比复盘/竞价海报宽(与 LadderPoster.LADDER_WIDTH 对齐)
-# 持仓处置图 1080 宽(HoldingPoster.HOLDING_WIDTH),默认 1200 视口够用,不必单列
+# 持仓处置图 / 复盘正文长图 1080 宽,默认 1200 视口够用,不必单列
 _KIND_VIEWPORT = {"ladder": 1400}
+# 复盘正文是**高度不定的长图**,2 倍会到几十 MB(超飞书图片上限推不出去)。
+# 前端 `usePosterExport` 的长图导出也正是为此传 1.5,两边同口径。
+_KIND_SCALE = {"report": 1.5}
 
 
 def poster_path(date: str, kind: str = "review") -> Path:
@@ -40,7 +44,7 @@ def render_poster(
 
     kind="review" 截复盘海报(?poster=date);kind="auction" 截盘前竞价海报
     (?poster=date&kind=auction&brief=agent解读);kind="ladder" 截连板天梯图;
-    kind="holding" 截持仓处置速览图。
+    kind="holding" 截持仓处置速览图;kind="report" 截完整复盘长图(整篇正文)。
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -55,7 +59,7 @@ def render_poster(
         from urllib.parse import quote
 
         url += f"&kind=auction&brief={quote(brief)}"
-    elif kind in ("ladder", "holding"):
+    elif kind in ("ladder", "holding", "report"):
         url += f"&kind={kind}"
 
     try:
@@ -64,7 +68,10 @@ def render_poster(
             browser = p.chromium.launch(channel="chrome")
             try:
                 width = _KIND_VIEWPORT.get(kind, 1200)  # 视口窄于海报会触发换行/裁切
-                page = browser.new_page(viewport={"width": width, "height": 1400}, device_scale_factor=2)
+                page = browser.new_page(
+                    viewport={"width": width, "height": 1400},
+                    device_scale_factor=_KIND_SCALE.get(kind, 2),
+                )
                 page.goto(url, timeout=CONFIG.poster_timeout_ms)
                 # 等数据拉齐(PosterView 在全部请求 settle 后置 data-poster-ready=1)
                 page.wait_for_selector(_READY, timeout=CONFIG.poster_timeout_ms)

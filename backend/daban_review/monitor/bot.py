@@ -50,7 +50,7 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
         return
     try:
         # 竞价图不带 agent 解读(with_brief 会调 agent 烧钱);已落库的解读走「竞价」文本指令看
-        kind = which if which in ("auction", "ladder", "holding") else "review"
+        kind = which if which in ("auction", "ladder", "holding", "report") else "review"
         path = poster.render_poster(date, kind=kind)
         if path:
             if send_lark_image(path, target=chat_id):
@@ -58,7 +58,11 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
             # 图推不出去也别让用户空手 —— 最常见原因是应用缺 im:resource:upload 权限
             # (发文字的权限和发图的是两套,文字通不代表图能通)。有文本版的就退回文本。
             log.warning("图片推送失败,退回文本: %s", path)
-            fb = {"holding": bc.fmt_holdings, "ladder": lambda: bc.fmt_ladder(date)}.get(kind)
+            fb = {
+                "holding": bc.fmt_holdings,
+                "ladder": lambda: bc.fmt_ladder(date),
+                "report": lambda: bc.fmt_report_text(date),
+            }.get(kind)
             send_lark(
                 f"{fb()}\n\n(图没推成:应用可能缺 im:resource:upload 权限,已退回文本)"
                 if fb
@@ -67,7 +71,7 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
             )
             return
         # 出图失败:分清「没复盘」和「技术故障」,别一律甩锅给没生成
-        if which == "review" and not service.get_report(date):
+        if which in ("review", "report") and not service.get_report(date):
             send_lark(f"{date} 还没生成复盘,先在网页端生成(或等盘后 15:30 自动跑)。", target=chat_id)
         else:
             send_lark(f"{date} 出图失败了。查 data/logs/bot.log 里的 poster 报错。", target=chat_id)
@@ -194,7 +198,8 @@ def main() -> None:
         if act["kind"] == "text":
             print(act["content"])
         elif act["kind"] == "image":
-            print(f"→ 会出图并推送:date={act['date']}")
+            # 必须打 which:五种图都走同一个 kind=image,不打出来自检等于没检
+            print(f"→ 会出图并推送:date={act['date']} which={act.get('which')}")
         else:
             print(f"→ 会走 agent 提问:date={act['date']} question={act['question']!r}")
         return

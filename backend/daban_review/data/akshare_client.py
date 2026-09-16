@@ -280,12 +280,90 @@ def realtime_quotes(codes: list[str]) -> dict[str, dict]:
     return out
 
 
+# ---- K线数据源:东财 push2his 主用,mootdx 兜底 ----
+#
+# **为什么从 mootdx 换到东财**:2026-09-11 起公开通达信服务器对数据类接口一律空返 ——
+# 实测请求 5 根日线只回 2 字节(头部声称 800 根、一根数据都没有),14 台可达服务器行为完全一致,
+# 而 `get_security_count` 这类元数据接口仍正常。mootdx 0.11.7 / tdxpy 0.2.7 都已是最新版且
+# 期间没升级过,所以是服务端不再供数,换任何客户端(pytdx…)都没用。症状会被 tdxpy 的
+# `raise_exception=False` 吞成「返回空表」,表面看像没数据,实际是 struct 解析越界。
+#
+# 东财这个接口 curl 实测通、格式干净、带历史。**但它限频比通达信严得多**(本项目排查时
+# 密集打了十几次就被掐,之后 0/12 全断,几小时才恢复)——所以调用方必须串行 + 节流,
+# 绝不能并发。`abnormal.py` 扫几百只时尤其注意。
+_EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# f51 时间 / f52 开 / f53 收 / f54 高 / f55 低 / f56 量(手) / f57 额(元),顺序即返回串的顺序
+_EM_FIELDS2 = "f51,f52,f53,f54,f55,f56,f57"
+# 指数用固定 secid:指数代码与个股会撞(000001 既是上证指数也是平安银行),不能按前缀推
+_EM_INDEX_SECID = {"999999": "1.000001", "399006": "0.399006"}
+
+
+def _em_secid(code: str) -> str:
+    """个股代码 → 东财 secid(`市场.代码`)。6 开头为沪市(含 60/68),其余深市。"""
+    c = str(code).zfill(6)
+    return f"{'1' if c.startswith('6') else '0'}.{c}"
+
+
+def _em_klines(secid: str, klt: int, limit: int) -> list[str]:
+    """拉东财 K线,返回原始 `"时间,开,收,高,低,量,额"` 字符串列表;失败或无数据返回 []。
+
+    fqt=0 不复权 —— 与原 mootdx 口径一致(`abnormal.py` 的 N 日累计涨幅按未复权算,
+    改成前复权会让历史涨幅整体漂移)。
+    """
+    params = {
+        "secid": secid, "fields1": "f1,f2,f3", "fields2": _EM_FIELDS2,
+        "klt": klt, "fqt": 0, "beg": "0", "end": "20500101", "lmt": limit,
+    }
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+    try:
+        data = requests.get(_EM_KLINE_URL, params=params, headers=headers, timeout=10).json()
+    except Exception as e:  # noqa: BLE001 单只失败不该炸掉整批扫描
+        log.warning("东财K线失败(%s klt=%s): %s", secid, klt, e)
+        return []
+    finally:
+        time.sleep(CONFIG.ak_throttle)  # 限频很严,成功也要节流
+    return ((data or {}).get("data") or {}).get("klines") or []
+
+
+def _em_frame(klines: list[str]) -> pd.DataFrame:
+    """原始 K线串 → DataFrame,列 dt/open/close/high/low/vol/amount(dt 为原始时间字符串)。"""
+    rows = [k.split(",") for k in klines]
+    rows = [r for r in rows if len(r) >= 7]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=["dt", "open", "close", "high", "low", "vol", "amount"])
+    for c in ("open", "close", "high", "low", "vol", "amount"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
 def stock_intraday_min(code: str, date: str) -> pd.DataFrame:
-    """个股当日 1 分钟线(mootdx / 通达信公开服务器,免费不限频)。
+    """个股当日 1 分钟线(东财 push2his 主用,mootdx 兜底)。
 
     返回统一列 time/open/close/high/low/vol;取不到返回空表。
     用于判断一字/带量翘板/炸板节点。
     """
+    import datetime as _dt
+
+    d = _dt.datetime.strptime(date, "%Y%m%d").date()
+    gap = max((_dt.date.today() - d).days, 0)
+    lmt = min(240 * (gap + 2), 2400)  # 每交易日约 240 根 1min,按需回溯
+    df = _em_frame(_em_klines(_em_secid(code), klt=1, limit=lmt))
+    if not df.empty:
+        day = df[df["dt"].str[:10].str.replace("-", "", regex=False) == date]
+        if day.empty:
+            return pd.DataFrame()
+        return pd.DataFrame({
+            "time": day["dt"].str[11:16].values,
+            "open": day["open"].values, "close": day["close"].values,
+            "high": day["high"].values, "low": day["low"].values,
+            "vol": day["vol"].fillna(0).values,
+        })
+    return _mootdx_intraday_min(code, date)
+
+
+def _mootdx_intraday_min(code: str, date: str) -> pd.DataFrame:
+    """分时兜底:mootdx。东财挂了才走这里(2026-09 起通达信空返,大概率也拿不到)。"""
     import datetime as _dt
 
     d = _dt.datetime.strptime(date, "%Y%m%d").date()
@@ -323,20 +401,37 @@ def stock_intraday_min(code: str, date: str) -> pd.DataFrame:
 
 
 def daily_bars(code: str, n: int = 8) -> pd.DataFrame:
-    """mootdx 日线近 n 根,统一列 date/open/close/high/low/vol/amount(供K线形态与量价感知)。"""
-    df = _mootdx().bars(symbol=code, frequency=4, offset=n)
-    if df is None or len(df) == 0:
+    """日线近 n 根(东财主用,mootdx 兜底),统一列 date/open/close/high/low/vol/amount。
+
+    供K线形态与量价感知。取不到返回空表 —— 调用方(kline/abnormal/pattern_blacklist)
+    都按「空表=这只跳过」处理,不要改成抛异常,否则一只拉不到会废掉整批扫描。
+    """
+    df = _em_frame(_em_klines(_em_secid(code), klt=101, limit=n))
+    if not df.empty:
+        return pd.DataFrame({
+            "date": df["dt"].str[:10].str.replace("-", "", regex=False).values,
+            "open": df["open"].values, "close": df["close"].values,
+            "high": df["high"].values, "low": df["low"].values,
+            "vol": df["vol"].fillna(0).values, "amount": df["amount"].fillna(0).values,
+        })
+
+    try:
+        mdf = _mootdx().bars(symbol=code, frequency=4, offset=n)
+    except Exception as e:  # noqa: BLE001 兜底源也挂 → 空表,别把整批扫描带崩
+        log.warning("日线兜底 mootdx 失败(%s): %s", code, e)
         return pd.DataFrame()
-    vol = pd.to_numeric(df["vol"], errors="coerce").fillna(0)
+    if mdf is None or len(mdf) == 0:
+        return pd.DataFrame()
+    vol = pd.to_numeric(mdf["vol"], errors="coerce").fillna(0)
     vol[vol < 1e-6] = 0  # 清洗通达信协议偶发的浮点垃圾
     return pd.DataFrame({
-        "date": df["datetime"].astype(str).str[:10].str.replace("-", "", regex=False).values,
-        "open": pd.to_numeric(df["open"], errors="coerce").values,
-        "close": pd.to_numeric(df["close"], errors="coerce").values,
-        "high": pd.to_numeric(df["high"], errors="coerce").values,
-        "low": pd.to_numeric(df["low"], errors="coerce").values,
+        "date": mdf["datetime"].astype(str).str[:10].str.replace("-", "", regex=False).values,
+        "open": pd.to_numeric(mdf["open"], errors="coerce").values,
+        "close": pd.to_numeric(mdf["close"], errors="coerce").values,
+        "high": pd.to_numeric(mdf["high"], errors="coerce").values,
+        "low": pd.to_numeric(mdf["low"], errors="coerce").values,
         "vol": vol.values,
-        "amount": pd.to_numeric(df["amount"], errors="coerce").values,
+        "amount": pd.to_numeric(mdf["amount"], errors="coerce").values,
     })
 
 
@@ -345,12 +440,31 @@ INDEX_CODES = {"999999": "上证指数", "399006": "创业板指"}
 
 
 def index_intraday_min(code: str, date: str) -> pd.DataFrame:
-    """指数当日 1 分钟线(mootdx `q.index`)。code:上证=999999 / 创业板指=399006。
+    """指数当日 1 分钟线(东财主用,mootdx 兜底)。code:上证=999999 / 创业板指=399006。
 
     返回统一列 time/close/high/low/vol/amount;取不到返回空表。
     供盘中「指数急杀」判据:近 N 分钟跌幅 + 当日 VWAP 均价(amount/vol)。
+
+    code 用的是**通达信**指数代码,东财那边要换成 secid(见 `_EM_INDEX_SECID`)——
+    不能按个股规则从代码前缀推市场,000001 既是上证指数又是平安银行。
     """
     import datetime as _dt
+
+    secid = _EM_INDEX_SECID.get(str(code))
+    if secid:
+        _d = _dt.datetime.strptime(date, "%Y%m%d").date()
+        _lmt = min(240 * (max((_dt.date.today() - _d).days, 0) + 2), 2400)
+        edf = _em_frame(_em_klines(secid, klt=1, limit=_lmt))
+        if not edf.empty:
+            eday = edf[edf["dt"].str[:10].str.replace("-", "", regex=False) == date]
+            if eday.empty:
+                return pd.DataFrame()
+            return pd.DataFrame({
+                "time": eday["dt"].str[11:16].values,
+                "close": eday["close"].values, "high": eday["high"].values,
+                "low": eday["low"].values, "vol": eday["vol"].fillna(0).values,
+                "amount": eday["amount"].fillna(0).values,
+            })
 
     d = _dt.datetime.strptime(date, "%Y%m%d").date()
     gap = max((_dt.date.today() - d).days, 0)

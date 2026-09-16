@@ -15,7 +15,7 @@ A股 打板/短线的**情绪面 + 连板属性博弈**复盘与监控系统。�
     原因:`watcher.run()` 到 15:00 会自己 break 退出(设计如此),配 KeepAlive 会变成
     收盘后整晚「拉起→立刻退出→再拉起」空转。9:20 起是因为 `_OPEN=9:25`,循环会 sleep 等到点。
     周末靠 `Weekday` 挡;**法定节假日挡不住**,由 `_is_trade_day()` 守卫自己退出
-    (判据=通达信当日日线是否已生成;没有节假日日历可用,akshare 那个走 py_mini_racer,本机已坏)。
+    (判据=当日日线是否已生成,现由东财供数;没有节假日日历可用,akshare 那个走 py_mini_racer,本机已坏)。
     守卫**在 9:35 后才生效**,更早判会把真交易日误杀(当日日线要开盘有成交才生成)。
   - plist:`~/Library/LaunchAgents/com.tiger.daban-{backend,frontend,bot,watcher}.plist`
   - 日志:`data/logs/{backend,frontend,bot,watcher}.log`
@@ -41,7 +41,7 @@ A股 打板/短线的**情绪面 + 连板属性博弈**复盘与监控系统。�
 
 ## 飞书机器人(手机查盘)
 
-私聊发指令:`复盘`(推海报图,可带 `复盘 20260723`)/ `候选` / `情绪` / `持仓` / `帮助`;**其余任何文本 → agent 自由提问**(1-2 分钟,先回执再发结果)。
+私聊发指令:`复盘`(摘要海报,可带 `复盘 20260723`)/ `复盘长图`(整篇正文长图)/ `候选` / `情绪` / `持仓` / `帮助`;**其余任何文本 → agent 自由提问**(1-2 分钟,先回执再发结果)。
 
 - 代码:`monitor/bot_commands.py`(纯函数:文本→动作,可离线单测)+ `monitor/bot.py`(ws 长连接 + 发送)
 - 离线自检**不用连飞书**:`PYTHONPATH=. python3 -m daban_review.monitor.bot --once "候选"`
@@ -72,8 +72,8 @@ cd ~/daban-review/frontend && npm run dev                     # :5173
 backend/daban_review/
   config.py            DB 路径 / akshare 降频 / Claude 网关 / usd_cny
   cli.py               review | emotion | ladder | fetch | analyze | backtest
-  data/                akshare_client.py(涨停池=akshare push2ex,分时/日线/指数=mootdx,
-                       涨停原因+涨停板块榜=同花顺 dataapi)
+  data/                akshare_client.py(涨停池=akshare push2ex,分时/日线/指数=东财 push2his
+                       主用 + mootdx 兜底,涨停原因+涨停板块榜=同花顺 dataapi)
                        store.py(SQLite WAL / live / usage) / fetch.py(拉取+列名归一+落库)
   metrics/             纯本地计算,不限频:emotion 情绪温度晋级率 / ladder 天梯+封单强度
                        sector 板块热度 / auction 竞价高开 / auction_live 盘前竞价决策台
@@ -97,7 +97,7 @@ frontend/src/
                        ThemePanel / AuctionPanel / CandidatePanel / ChatDrawer
                        ReportSummary(核心矛盾+导出) + ReportBody(SSE Markdown 正文)
                        HoldingsList + HoldingForm + HoldingAnalysis
-                       PosterView + AuctionPoster(海报,前后端共用排版)
+                       PosterView + AuctionPoster + ReportPoster(海报,前后端共用排版)
                        IntradayDialog(原生 echarts)
 data/                  SQLite 库 + posters/ + logs/
 ```
@@ -119,7 +119,18 @@ data/                  SQLite 库 + posters/ + logs/
   (冰点/修复/发酵/分歧/高潮/退潮)是因为放开写会出现"高潮尾部""退潮初期""普涨劣质高潮"三种措辞。
 - **改 prompt 或候选池后必须同日复跑 ≥2 次比对**:`python3 tools/cmp_reviews.py /tmp/r1.txt /tmp/r2.txt`
   (抽自检行/周期结论/方向/画像票/矛盾主角/候选做 diff,六项应全 ✅)。别只看候选,正文漂移是独立问题。
-- **分时是 L1,不需要 L2**;可编程 L2 个人拿不到(通达信 L2 仅客户端可看无 API)。实时/分时/指数一律走 **mootdx**,别退回 akshare push2(限频即断)。
+- **分时是 L1,不需要 L2**;可编程 L2 个人拿不到(通达信 L2 仅客户端可看无 API)。
+- **K线(日线/分时/指数)主源是东财 `push2his`,mootdx 只剩兜底** —— 2026-09-11 起公开通达信
+  服务器对数据类接口一律**空返**:请求 5 根日线只回 2 字节(头部声称 800 根、一根数据都没有),
+  14 台可达服务器行为完全一致,而 `get_security_count` 这类元数据接口仍正常。mootdx 0.11.7 /
+  tdxpy 0.2.7 都已是 PyPI 最新且期间没升级过 → 是服务端不供数,**换 pytdx 等客户端没用**。
+  症状会被 tdxpy 的 `raise_exception=False` 吞成「返回空表」,查的时候别被这层骗了
+  (打开它才看得到真因是 `struct.error: unpack requires a buffer of 4 bytes`)。
+  **东财限频比通达信严得多**:排查时密集打了十几次就被掐,之后连续 12 次全断、几小时才恢复。
+  所以 `_em_klines` 里每次调用后都 `sleep(ak_throttle)`,调用方**必须串行**,绝不能并发;
+  `abnormal.py` 扫几百只时尤其注意。涨停池仍走 push2**ex**(另一台主机,没受影响)。
+- 指数代码要过 `_EM_INDEX_SECID` 映射(通达信 999999 → 东财 1.000001),**不能按前缀推市场** ——
+  000001 既是上证指数也是平安银行。
 - agent 走自建的 Anthropic 兼容网关,凭证与地址都在 `backend/.env`(`ANTHROPIC_BASE_URL/API_KEY/CLAUDE_MODEL`),**不要提交 .env**;前端的 `frontend/.env.local` 放 MUI X 授权码与文档链接,同样不提交。
 - **持仓截图识别(`agent/vision.py`)故意不走 claude-agent-sdk**:单轮 vision 任务,`requests` 直接
   POST `{BASE_URL}/v1/messages` 传 base64 图片就够(网关已实测支持 vision),不必引 anthropic 依赖。
@@ -159,12 +170,18 @@ data/                  SQLite 库 + posters/ + logs/
 - **改完海报组件必须 `npm run build`,否则飞书推的还是旧图**:后端 `poster.py` 用 Playwright 截的是
   `POSTER_BASE_URL`(默认 `127.0.0.1:8000`)—— `main.py` 把 **`frontend/dist` 构建产物**挂在 `/` 上,
   **不是** vite dev server 的 :5173。所以网页上看着已经改好、飞书推出来还是老样子。
-  涉及的文件:`PosterView / LadderPoster / AuctionPoster / HoldingPoster` 以及它们共用的
-  `LadderGrid / HoldingBoard`。自检:`PYTHONPATH=. python3 -c "from daban_review.app import poster;
-  print(poster.render_poster('<date>', kind='holding'))"` 然后看 `data/posters/` 里那张图。
-- **海报与网页面板共用一份排版**(`LadderGrid`、`HoldingBoard`):别写两套,改一处就好。
-  海报侧没有 tooltip 兜底 —— 面板上截断后能 hover 看全的字段(如持仓触发价),海报上必须给够行数,
-  否则信息永久丢失。
+  涉及的文件:`PosterView / LadderPoster / AuctionPoster / HoldingPoster / ReportPoster` 以及它们
+  共用的 `LadderGrid / HoldingBoard / ReportStructured`。自检:`PYTHONPATH=. python3 -c
+  "from daban_review.app import poster; print(poster.render_poster('<date>', kind='holding'))"`
+  然后看 `data/posters/` 里那张图。
+- **海报与网页面板共用一份排版**(`LadderGrid`、`HoldingBoard`、`ReportStructured`):别写两套,
+  改一处就好。海报侧没有 tooltip 兜底 —— 面板上截断后能 hover 看全的字段(如持仓触发价),
+  海报上必须给够行数,否则信息永久丢失。
+- **五种海报 kind**(`poster.py:_KIND_NAME`):`review` 摘要海报 / `auction` 盘前竞价 /
+  `ladder` 连板天梯 / `holding` 持仓处置 / `report` **完整复盘长图**(整篇正文,机器人「复盘长图」)。
+  长图是唯一**高度不定**的一种,`_KIND_SCALE` 把它的 `device_scale_factor` 降到 1.5 ——
+  2 倍会到几十 MB 超飞书图片上限(前端 `usePosterExport` 的长图导出同口径)。
+  实测 20260916 一篇 = 1620×4365px / 1.4MB,离 Chrome 截图高度上限与飞书 10MB 都还很远。
 - ECharts 在 MUI Dialog 里用**原生 echarts** 手动 `init/setOption/resize`,`echarts-for-react` 会 stale 只画左半。
 - 通达信协议偶发浮点垃圾(`5.87e-39`),量能一律 `<1e-6` 归零。
 - 前端 MUI v7 + emotion,样式用 `sx`,不新增 `.scss`。

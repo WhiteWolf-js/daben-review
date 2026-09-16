@@ -10,10 +10,11 @@ import PosterView from "./components/PosterView";
 import AuctionPoster from "./components/AuctionPoster";
 import LadderPoster from "./components/LadderPoster";
 import HoldingPoster from "./components/HoldingPoster";
+import ReportPoster from "./components/ReportPoster";
 
 // ?poster=YYYYMMDD 直接渲染纯海报页(供手动分享与后端 Playwright 截图),不引路由库
 // 追加 &kind=auction 渲染盘前竞价海报(&brief= 传 agent 盘前解读)、&kind=ladder 渲染连板天梯、
-// &kind=holding 渲染持仓处置速览
+// &kind=holding 渲染持仓处置速览、&kind=report 渲染完整复盘长图(整篇正文)
 const _q = new URLSearchParams(window.location.search);
 const posterDate = _q.get("poster");
 const posterKind = _q.get("kind");
@@ -36,6 +37,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             <LadderPoster date={posterDate} />
           ) : posterKind === "holding" ? (
             <HoldingPoster date={posterDate} />
+          ) : posterKind === "report" ? (
+            <ReportPoster date={posterDate} />
           ) : (
             <PosterView date={posterDate} />
           )
