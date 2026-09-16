@@ -149,7 +149,7 @@ async def run_review(
     # 候选池:纯规则先筛好排好,agent 只能在池内选(复现性的关键,见 metrics/candidate_pool.py)
     # prev_zbgc 让候选池能标「弱转强」(昨炸板今涨停,回测有 +1.8pp 超额)
     pool = build_candidate_pool(pools, emotion, themes, sector["theme"],
-                                prev_zbgc=store.prev_zbgc_codes(date))
+                                prev_zbgc=store.prev_zbgc_codes(date), today=date)
     server, tool_names = make_server(date, emotion, ladder, sector, auction, hot_klines, pool)
 
     options = ClaudeAgentOptions(

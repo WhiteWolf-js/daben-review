@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import os
+import threading
 import time
 
 from ..config import CONFIG
@@ -30,6 +32,8 @@ _PM_OPEN = dt.time(13, 0)
 _CLOSE = dt.time(15, 0)
 # 情绪最活跃、加密轮询的时段
 _RUSH = [(dt.time(9, 25), dt.time(10, 0)), (dt.time(14, 30), dt.time(15, 0))]
+# 看门狗强制退出点(收盘 +5min,给最后一轮留余量)
+_HARD_STOP = dt.time(15, 5)
 
 
 def _in_session(t: dt.time) -> bool:
@@ -92,6 +96,32 @@ def poll_once(date: str) -> tuple[dict, dict]:
     return snap, index_state
 
 
+def _watchdog(stop_at: dt.time = _HARD_STOP) -> None:
+    """独立线程:到点无条件结束进程,不管主循环在干什么。
+
+    主循环的 `now > _CLOSE` 判据只在每轮**开头**生效,而 `poll_once` 里的 try/except 只拦
+    异常、拦不住「挂起」—— 一旦某个网络调用卡死,就再也回不到那个判据。实测 2026-09-11
+    卡住后进程活了 5 天:不退出、不写日志;而 launchd 的 `StartCalendarInterval` 看见
+    进程还在就不会重复拉起,于是 9/14、9/15、9/16 三个交易日整天没有盘中监控,直到人工发现。
+    所以「停机」这件事不能交给主循环,必须由外部强制执行。
+
+    用 `os._exit` 而不是 `sys.exit`:后者只是在看门狗自己这条线程里抛 SystemExit,
+    卡死的主线程照样活着,进程还是不退 —— 那就白写了。
+    """
+    now = dt.datetime.now()
+    wait = (dt.datetime.combine(now.date(), stop_at) - now).total_seconds()
+    if wait <= 0:
+        return  # 已过点(手动补跑),主循环自己会立刻 break,不用管
+    time.sleep(wait)
+    log.error("看门狗触发:%s 到点进程仍未退出(主循环疑似卡死),强制结束", stop_at.strftime("%H:%M"))
+    # os._exit 不做任何清理,上面那行日志得自己刷出去。只 flush 不要 logging.shutdown():
+    # 后者会**关闭**所有 handler,跑单测时 os._exit 被打桩、这行真的执行,会把 pytest
+    # 自己的日志与报告机制一起关掉(现象:测试全绿但没有 summary、junit 文件也不生成)。
+    for h in logging.getLogger().handlers:
+        h.flush()
+    os._exit(0)
+
+
 def run(once: bool = False) -> None:
     date = dt.date.today().strftime("%Y%m%d")
 
@@ -146,7 +176,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     ap = argparse.ArgumentParser(prog="daban_review.monitor.watcher")
     ap.add_argument("--once", action="store_true", help="跑一轮打印(自检,不通知)")
-    run(once=ap.parse_args().once)
+    once = ap.parse_args().once
+    # 看门狗装在 main 而不是 run:它干的是「结束这个进程」,是进程级的事。
+    # 装进 run() 会让直接调 run() 的单测也起一条真会 os._exit 的线程 —— 测试里
+    # time.sleep 常被打桩,于是它立刻把 pytest 打死(exit=0 但没有 summary,排查半天)。
+    if not once:
+        log.info("看门狗已装载:%s 强制退出", _HARD_STOP.strftime("%H:%M"))
+        threading.Thread(target=_watchdog, name="watchdog", daemon=True).start()
+    run(once=once)
 
 
 if __name__ == "__main__":

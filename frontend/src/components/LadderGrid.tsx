@@ -91,7 +91,7 @@ function Cell({
         sx={{
           fontSize: px(11), lineHeight: 1.4, whiteSpace: "nowrap",
           overflow: "hidden", textOverflow: "ellipsis",
-          color: s.broken ? "#484f58" : s.sector_hot ? "#f5a623" : "#6e7681",
+          color: s.broken ? "#484f58" : s.sector_hot ? "#f5a623" : "#8b949e",
         }}
       >
         {s.sector || s.industry}

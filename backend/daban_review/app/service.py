@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import closing
 from typing import Callable
 
 from ..agent.runner import load_pools, run_review
@@ -132,6 +133,7 @@ def get_ladder_board(date: str) -> dict:
     themes: dict[str, list[str]] = {}
     prev_themes: dict[str, list[str]] = {}
     hot: list[str] = []
+    cq: dict[str, dict] = {}
     try:
         themes = ak.ths_limitup_reasons(date)
         # 取全部 ≥2 只的题材(不是面板的 top12)——否则四成格子找不到归属。
@@ -145,8 +147,12 @@ def get_ladder_board(date: str) -> dict:
             prev_themes = ak.ths_limitup_reasons(pd_)
     except Exception as e:  # noqa: BLE001
         log.warning("天梯题材归属拉取失败(退化为显示行业): %s", e)
+    try:
+        cq = ak.concept_quotes(date) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("天梯 concept_quotes 拉取失败(宽化标签不生效): %s", e)
 
-    return ladder_board(pools, themes=themes, prev_themes=prev_themes, hot_themes=hot)
+    return ladder_board(pools, themes=themes, prev_themes=prev_themes, hot_themes=hot, concept_quotes=cq)
 
 
 _POOL_GRADES = ("A+", "A")
@@ -184,7 +190,7 @@ def get_candidate_pool(date: str, grades: tuple[str, ...] = _POOL_GRADES) -> dic
     heat_all = theme_heat(pools, themes, top=9999)           # 全量,仅用于查联动读数
     by_theme = {t["theme"]: t for t in heat_all}
     built = build_candidate_pool(pools, emotion, themes, heat_prod,
-                                 prev_zbgc=store.prev_zbgc_codes(date))
+                                 prev_zbgc=store.prev_zbgc_codes(date), today=date)
 
     def _link(item: dict) -> dict | None:
         """该票身位最强的成板块题材 + 家数/连板数/最高板;全是单票碎片则 None(孤票)。"""
@@ -231,6 +237,26 @@ def get_intraday_rotation(date: str) -> dict:
     return out
 
 
+def get_abnormal_rank(date: str, window: int = 10) -> dict:
+    """N 日累计涨幅异动榜。**吃缓存**:历史交易日永不变,算一次就够(要拉几百只日线)。
+
+    只有 date 是今天才绕过缓存(盘中日线还在长)。
+    """
+    import datetime as dt
+
+    from ..metrics.abnormal import build_abnormal_rank
+
+    today = dt.date.today().strftime("%Y%m%d")
+    if date != today:
+        cached = store.read_abnormal(date, window)
+        if cached:
+            return cached
+    out = build_abnormal_rank(date, window)
+    if date != today and out.get("fetched"):  # 今天的别存;一只都没拉到也别存
+        store.save_abnormal(date, window, out)
+    return out
+
+
 def list_dates(recent: int = 22) -> list[str]:
     """可选日期 = 最近约 1 个月交易日 ∪ 库里已存日期(倒序)。
 
@@ -272,14 +298,16 @@ def get_report(date: str) -> dict | None:
 
 
 def save_report(date: str, markdown: str) -> None:
+    """存复盘正文 + 顺带算好的情绪/候选,三张表一个事务写完。
+
+    **先算完再开事务,别一边握着写锁一边联网。** 早期是进函数就 INSERT review_report、
+    一路算到最后才 commit —— 中间夹着两次 `ths_limitup_reasons`(同花顺)和全量重算,
+    等于把 SQLite 写锁攥住几十秒;同花顺一抽,锁就攥到天荒地老。实测后端进程这么攥住
+    一次之后,库对所有其它写入方(CLI/watcher/bot)硬失败 `database is locked`,
+    而且 WAL 下 busy_timeout 也救不了 —— 只能重启后端。计算区一行 SQL 都不要有。
+    """
     import datetime as dt
 
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO review_report(date, markdown, created_at) VALUES(?,?,?)",
-        (date, markdown, dt.datetime.now().isoformat(timespec="seconds")),
-    )
     # 算一次:情绪(存 metrics)、周期(打分基准)、个股画像(打分因子来源)、候选池(校验 agent 有没有越界)
     from ..agent.runner import load_pools
     from ..data import akshare_client as ak
@@ -306,16 +334,11 @@ def save_report(date: str, markdown: str) -> None:
         for p in _profs
     }
 
-    conn.execute(
-        "INSERT OR REPLACE INTO emotion_metrics(date, metrics) VALUES(?,?)",
-        (date, json.dumps(emotion, ensure_ascii=False)),
-    )
-
     # 与 runner 起 agent 时同一套规则重算池,用于判定候选是否出自池内(池外票=agent 违规,标记出来)
     try:
         themes = ak.ths_limitup_reasons(date)
         codes_by_style = pool_codes(
-            build_candidate_pool(pools, emotion, themes, theme_heat(pools, themes))
+            build_candidate_pool(pools, emotion, themes, theme_heat(pools, themes), today=date)
         )
     except Exception as e:  # noqa: BLE001 题材拉取失败不该阻塞报告落库
         log.warning("候选池校验跳过(%s)", e)
@@ -335,15 +358,25 @@ def save_report(date: str, markdown: str) -> None:
             g["grade"], g["position"], g["score"], json.dumps(g["reasons"], ensure_ascii=False),
             c.get("pool_rank"), c.get("price_ref"), in_pool,
         ))
-    conn.execute("DELETE FROM candidates WHERE date=?", (date,))
-    conn.executemany(
-        "INSERT INTO candidates(date, style, code, name, trigger_cond, giveup_cond, reason, "
-        "grade, position, score, reasons, pool_rank, price_ref, in_pool) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        rows,
-    )
-    conn.commit()
-    conn.close()
+    # ---- 到这里才碰库:三张表一个短事务写完,closing 保证异常时也释放写锁 ----
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO review_report(date, markdown, created_at) VALUES(?,?,?)",
+            (date, markdown, dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO emotion_metrics(date, metrics) VALUES(?,?)",
+            (date, json.dumps(emotion, ensure_ascii=False)),
+        )
+        conn.execute("DELETE FROM candidates WHERE date=?", (date,))
+        conn.executemany(
+            "INSERT INTO candidates(date, style, code, name, trigger_cond, giveup_cond, reason, "
+            "grade, position, score, reasons, pool_rank, price_ref, in_pool) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        conn.commit()
 
 
 def candidate_outcome(code: str, base_date: str) -> dict | None:
@@ -383,34 +416,42 @@ def candidate_outcome(code: str, base_date: str) -> dict | None:
 
 
 def get_candidates(date: str) -> list[dict]:
-    """读某日结构化候选票(按四风格排序);次日已收盘则懒加载算隔日溢价并回存。"""
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    rows = conn.execute(
-        "SELECT rowid, style, code, name, trigger_cond, giveup_cond, reason, grade, position, score, "
-        "reasons, next_date, open_prem, close_prem, pool_rank, price_ref, in_pool "
-        "FROM candidates WHERE date=? ORDER BY rowid",
-        (date,),
-    ).fetchall()
-    out = []
+    """读某日结构化候选票(按四风格排序);次日已收盘则懒加载算隔日溢价并回存。
+
+    **读完先关库,算完隔日溢价再开写事务。** `candidate_outcome` 每只都要走 mootdx 拉日线,
+    早期是第一条 UPDATE 就把写事务开着、然后一只一只联网算 —— 和 `save_report` 同一个坑
+    (为什么不能一边握写锁一边联网,见那边的注释)。
+    """
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        rows = conn.execute(
+            "SELECT rowid, style, code, name, trigger_cond, giveup_cond, reason, grade, position, score, "
+            "reasons, next_date, open_prem, close_prem, pool_rank, price_ref, in_pool "
+            "FROM candidates WHERE date=? ORDER BY rowid",
+            (date,),
+        ).fetchall()
+        conn.commit()  # _ensure_tables 的 DDL 也是写,别让它挂着
+
+    out: list[dict] = []
+    backfill: list[tuple[str, tuple]] = []  # 攒起来最后一次性写,联网期间不持锁
     for r in rows:
         rowid, open_prem, close_prem, next_date = r[0], r[12], r[13], r[11]
         if open_prem is None:  # 未验证过 → 尝试算次日溢价
             oc = candidate_outcome(r[2], date)
             if oc:
                 next_date, open_prem, close_prem = oc["next_date"], oc["open_prem"], oc["close_prem"]
-                conn.execute(
+                backfill.append((
                     "UPDATE candidates SET next_date=?, open_prem=?, close_prem=? WHERE rowid=?",
                     (next_date, open_prem, close_prem, rowid),
-                )
+                ))
         elif close_prem is None and next_date:  # open_prem 已有但 close_prem 未落（盘中写的）→ 补算
             oc = candidate_outcome(r[2], date)
             if oc and oc["close_prem"] is not None:
                 close_prem = oc["close_prem"]
-                conn.execute(
+                backfill.append((
                     "UPDATE candidates SET close_prem=? WHERE rowid=?",
                     (close_prem, rowid),
-                )
+                ))
         out.append({
             "style": r[1], "code": r[2], "name": r[3], "trigger": r[4], "giveup": r[5], "reason": r[6],
             "grade": r[7] or "", "position": r[8] or "", "score": r[9],
@@ -419,8 +460,13 @@ def get_candidates(date: str) -> list[dict]:
             "pool_rank": r[14], "price_ref": r[15] or "",
             "in_pool": True if r[16] is None else bool(r[16]),  # 老数据无此列 → 不显示违规
         })
-    conn.commit()
-    conn.close()
+
+    if backfill:
+        with closing(store.get_conn()) as conn:
+            for sql, params in backfill:
+                conn.execute(sql, params)
+            conn.commit()
+
     order = {s: i for i, s in enumerate(CANDIDATE_STYLES)}
     out.sort(key=lambda c: order.get(c["style"], len(order)))
     return out
@@ -689,14 +735,13 @@ def save_auction_brief(date: str, brief: str) -> None:
 
     if not brief.strip():
         return
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO auction_brief(date, brief, created_at) VALUES(?,?,?)",
-        (date, brief, dt.datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO auction_brief(date, brief, created_at) VALUES(?,?,?)",
+            (date, brief, dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
 
 
 def get_auction_brief(date: str) -> dict | None:
@@ -760,16 +805,15 @@ def add_holding(code: str, name: str, buy_date: str, buy_price: float,
     """新增/更新一条打板持仓(code 唯一,重复即覆盖——补仓后成本价会变)。"""
     import datetime as dt
 
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO holdings(code, name, buy_date, buy_price, buy_boards, shares, note, created_at) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (code, name, buy_date, float(buy_price), int(buy_boards or 0), int(shares or 0), note,
-         dt.datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO holdings(code, name, buy_date, buy_price, buy_boards, shares, note, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (code, name, buy_date, float(buy_price), int(buy_boards or 0), int(shares or 0), note,
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
 
 
 def add_holdings_bulk(items: list[dict]) -> int:
@@ -794,12 +838,11 @@ def add_holdings_bulk(items: list[dict]) -> int:
 
 
 def delete_holding(code: str) -> None:
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    conn.execute("DELETE FROM holdings WHERE code=?", (code,))
-    conn.execute("DELETE FROM holding_analysis WHERE code=?", (code,))
-    conn.commit()
-    conn.close()
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        conn.execute("DELETE FROM holdings WHERE code=?", (code,))
+        conn.execute("DELETE FROM holding_analysis WHERE code=?", (code,))
+        conn.commit()
 
 
 def list_holdings() -> list[dict]:
@@ -939,19 +982,19 @@ def _save_holding_analysis(codes: list[str], date: str, markdown: str) -> None:
     import datetime as dt
 
     now = dt.datetime.now().isoformat(timespec="seconds")
-    conn = store.get_conn()
-    _ensure_tables(conn)
-    conn.executemany(
-        "INSERT OR REPLACE INTO holding_analysis(code, analysis_date, markdown, verdict, created_at) "
-        "VALUES(?,?,?,?,?)",
-        [
-            (c, date, markdown,
-             json.dumps(_extract_holding_verdict(markdown, c), ensure_ascii=False), now)
-            for c in codes
-        ],
-    )
-    conn.commit()
-    conn.close()
+    rows = [
+        (c, date, markdown,
+         json.dumps(_extract_holding_verdict(markdown, c), ensure_ascii=False), now)
+        for c in codes
+    ]
+    with closing(store.get_conn()) as conn:
+        _ensure_tables(conn)
+        conn.executemany(
+            "INSERT OR REPLACE INTO holding_analysis(code, analysis_date, markdown, verdict, created_at) "
+            "VALUES(?,?,?,?,?)",
+            rows,
+        )
+        conn.commit()
 
 
 async def analyze_holdings(codes: list[str], date: str, on_text: Callable[[str], None] | None = None,

@@ -245,6 +245,35 @@ export interface ThemeRow {
 export const getThemeHeat = (date: string) =>
   http.get<ThemeRow[]>(`/api/theme-heat/${date}`).then((r) => r.data);
 
+// ---- 异动榜(N日累计涨幅)----
+export type AbnormalTier = "triple" | "double" | "entering" | "warm";
+
+export interface AbnormalRow {
+  code: string;
+  name: string;
+  price: number;
+  pct_today: number; // 小数,0.1 = 10%
+  pct_window: number;
+  boards: number;
+  industry: string;
+  themes: string[];
+  tier: AbnormalTier;
+  actual_window: number;
+}
+
+export interface AbnormalRank {
+  date: string;
+  window: number;
+  fetched: number;
+  updated_at: string;
+  rows: AbnormalRow[];
+}
+
+export const getAbnormal = (date: string, window = 10) =>
+  http
+    .get<AbnormalRank>(`/api/abnormal/${date}?window=${window}`)
+    .then((r) => r.data);
+
 /** 强制重拉当日各池(盘中刷新),返回后再拉各面板数据 */
 export const refreshDay = (date: string) =>
   http.post<{ date: string; counts: Record<string, number> }>(`/api/refresh/${date}`).then((r) => r.data);

@@ -247,11 +247,17 @@ class TestSector:
         return d["rows"][0]["stocks"][0]
 
     def test_hot_theme_wins(self):
+        """热度第一的题材胜出,再宽化成方向名(算力租赁 → 算力)。"""
         s = self._one(themes={"A": ["东数西算", "算力租赁"]}, hot_themes=["算力租赁", "东数西算"])
-        assert (s["sector"], s["sector_hot"]) == ("算力租赁", True)
+        assert (s["sector"], s["sector_hot"]) == ("算力", True)
 
     def test_picks_best_ranked_among_hot(self):
-        """多个题材都成板块时取热度最好的那个(hot_themes 已按热度排好序)。"""
+        """多个题材都成板块时取热度最好的那个(hot_themes 已按热度排好序)。
+
+        同时锁死:hot[0]「东数西算」不在 `_BROAD_ROOTS` 里宽化不了,也**不许**顺着
+        往下拿能宽化的 hot[1]「算力租赁」→「算力」。根词表人工维护必然不全,
+        那样写会让没收录的真热门方向被次热题材系统性顶掉。
+        """
         s = self._one(themes={"A": ["东数西算", "算力租赁"]}, hot_themes=["东数西算", "算力租赁"])
         assert s["sector"] == "东数西算"
 

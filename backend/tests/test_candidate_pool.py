@@ -21,6 +21,18 @@ def _row(code, name, boards, seal_amount=3e8, float_mv=1e10, first_seal="093000"
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_external(monkeypatch):
+    """build_candidate_pool 现在调 get_blacklist / volume_ratio / store.auction_bid_vols
+    (真实 DB + 网络 daily_bars)。单测回归「纯计算无网络」:patch 掉三者,
+    黑名单=空、vr=None(不缩量)、竞价=空(不大单)——与改动前的池行为等价。
+    缩量/黑名单/竞价大单的专门测试在 TestShrinkage 等类里单独 patch 验证。"""
+    import daban_review.metrics.candidate_pool as cp
+    monkeypatch.setattr(cp, "get_blacklist", lambda today, refresh=False: set())
+    monkeypatch.setattr(cp, "volume_ratio", lambda code, date, df=None: None)
+    monkeypatch.setattr(cp.store, "auction_bid_vols", lambda date: {})
+
+
 @pytest.fixture
 def pools():
     # 3板两只(封流比不同)、1板两只(一只有题材一只无)、5板一只
@@ -243,3 +255,139 @@ class TestPoolCodes:
 
     def test_empty_payload(self):
         assert pool_codes({}) == {}
+
+
+class TestShrinkage:
+    """缩量降权:一二板缩量轻降权(shrink_penalty=1)、三板及以上缩量重降权(=2)。
+    口径 vr<0.8 = 缩量,与 kline 一致;非缩量=0 不影响原排序。"""
+
+    def test_penalty_grading(self):
+        from daban_review.metrics.candidate_pool import _shrink_penalty
+        assert _shrink_penalty({"is_shrink": False, "boards": 3}) == 0
+        assert _shrink_penalty({"is_shrink": True, "boards": 1}) == 1
+        assert _shrink_penalty({"is_shrink": True, "boards": 2}) == 1
+        assert _shrink_penalty({"is_shrink": True, "boards": 3}) == 2
+        assert _shrink_penalty({"is_shrink": True, "boards": 5}) == 2
+
+    def test_shrink_sinks_below_nonshrink(self):
+        """缩量3板即便 score 更高,也排到非缩量票后面。"""
+        from daban_review.metrics.candidate_pool import _sort_key
+        shrink = {"score": 100, "seal_strength": 0.05, "first_seal": "093000",
+                  "code": "000001", "boards": 3, "is_shrink": True}
+        normal = {"score": 10, "seal_strength": 0.01, "first_seal": "140000",
+                  "code": "000002", "boards": 3, "is_shrink": False}
+        assert _sort_key(shrink) > _sort_key(normal)
+
+    def test_shrink_3board_heavier_than_2board(self):
+        """三板缩量比一二板缩量更靠后(高度+缩量=接力断档,风险更高)。"""
+        from daban_review.metrics.candidate_pool import _sort_key
+        b3 = {"score": 50, "seal_strength": 0.03, "first_seal": "093000",
+              "code": "000001", "boards": 3, "is_shrink": True}
+        b2 = {"score": 50, "seal_strength": 0.03, "first_seal": "093000",
+              "code": "000002", "boards": 2, "is_shrink": True}
+        assert _sort_key(b3) > _sort_key(b2)
+
+    def test_risk_flags(self):
+        from daban_review.metrics.candidate_pool import _risk_flags
+        assert _risk_flags({"is_shrink": True, "boards": 3, "is_bigbid": True}) == ["缩量3板", "量化大单"]
+        assert _risk_flags({"is_shrink": True, "boards": 1, "is_bigbid": False}) == ["缩量1板"]
+        assert _risk_flags({"is_shrink": False, "is_bigbid": False}) == []
+
+    def test_bigbid_sinks_but_kept(self, emotion, monkeypatch):
+        """竞价挂 20W+ 手大单的票降权沉底但保留(不像黑名单硬排),并标 risk_flags。"""
+        import daban_review.metrics.candidate_pool as cp
+        monkeypatch.setattr(cp.store, "auction_bid_vols",
+                           lambda date: {"000001": 300_000})
+        p = {"limitup": pd.DataFrame([
+            _row("000001", "大单量化", 3, seal_amount=4e8),
+            _row("000002", "正常票", 3, seal_amount=4e8),
+        ])}
+        items = build_candidate_pool(p, emotion, {}, [])["pool"]["低位连板接力"]
+        assert [i["code"] for i in items] == ["000002", "000001"]
+        assert items[1]["risk_flags"] == ["量化大单"]
+        assert items[0]["risk_flags"] == []
+
+
+class TestBlacklist:
+    """历史模式黑名单(缩量→次日炸板/低开/一字≥2次):命中硬排除,不进候选池。"""
+
+    def test_blacklist_excludes_from_pool(self, emotion, monkeypatch):
+        import daban_review.metrics.candidate_pool as cp
+        monkeypatch.setattr(cp, "get_blacklist",
+                           lambda today, refresh=False: {"000001"})
+        p = {"limitup": pd.DataFrame([
+            _row("000001", "黑名单票", 3, seal_amount=4e8),
+            _row("000002", "正常票", 3, seal_amount=4e8),
+        ])}
+        items = build_candidate_pool(p, emotion, {}, [])["pool"]["低位连板接力"]
+        assert [i["code"] for i in items] == ["000002"]
+
+
+class TestVolumeRatio:
+    """kline.volume_ratio = 当日量 / 近5日均量(口径同 _bar_features 的 vr)。"""
+
+    def _bars(self, vols, dates=None):
+        n = len(vols)
+        dates = dates or [f"2026010{i}" for i in range(1, n + 1)]
+        return pd.DataFrame([
+            {"date": d, "vol": v, "close": 10, "open": 10, "high": 10, "low": 10}
+            for d, v in zip(dates, vols)
+        ])
+
+    def test_ratio_uses_prev5_avg(self, monkeypatch):
+        from daban_review.metrics import kline
+        bars = self._bars([100, 100, 100, 100, 100, 40])  # 末根当日40,前5均100
+        monkeypatch.setattr(kline, "daily_bars", lambda code, n: bars)
+        assert kline.volume_ratio("000001", "20260106") == 0.4
+
+    def test_returns_none_when_date_missing(self, monkeypatch):
+        from daban_review.metrics import kline
+        monkeypatch.setattr(kline, "daily_bars", lambda code, n: self._bars([100, 100]))
+        assert kline.volume_ratio("000001", "20260202") is None
+
+    def test_df_injected_skips_network(self, monkeypatch):
+        """scan 批量扫描时注入 df,不再调 daily_bars(一只票只拉一次)。"""
+        from daban_review.metrics import kline
+        bars = self._bars([100, 100, 100, 100, 100, 80])
+        called = []
+        monkeypatch.setattr(kline, "daily_bars", lambda *a, **k: called.append(1) or bars)
+        assert kline.volume_ratio("000001", "20260106", df=bars) == 0.8
+        assert called == []
+
+
+class TestNextDayBad:
+    """pattern_blacklist._next_day_bad:缩量票次日炸板/一字/低开 → True。"""
+
+    def test_zhaban(self):
+        from daban_review.metrics.pattern_blacklist import _next_day_bad
+        npool = {"000001": {"first_seal": "093000", "break_times": 2}}
+        assert _next_day_bad("000001", "20260101", npool, lambda c: None) is True
+
+    def test_yizi(self):
+        from daban_review.metrics.pattern_blacklist import _next_day_bad
+        npool = {"000001": {"first_seal": "092500", "break_times": 0}}
+        assert _next_day_bad("000001", "20260101", npool, lambda c: None) is True
+
+    def test_strong_continues_not_bad(self):
+        """次日继续涨停且非炸非一字(强势封板)——不算问题。"""
+        from daban_review.metrics.pattern_blacklist import _next_day_bad
+        npool = {"000001": {"first_seal": "093000", "break_times": 0}}
+        assert _next_day_bad("000001", "20260101", npool, lambda c: None) is False
+
+    def test_low_open_next_day(self):
+        """次日未涨停 + 低开(open<前收)→ 问题。"""
+        from daban_review.metrics.pattern_blacklist import _next_day_bad
+        bars = pd.DataFrame([
+            {"date": "20260101", "close": 10.0, "open": 10.0, "high": 10, "low": 10, "vol": 100},
+            {"date": "20260102", "close": 9.5, "open": 9.5, "high": 10, "low": 9.3, "vol": 100},
+        ])
+        assert _next_day_bad("000001", "20260101", {}, lambda c: bars) is True
+
+    def test_high_open_next_day_not_bad(self):
+        """次日未涨停但高开 —— 不算问题(可能继续涨只是没封板)。"""
+        from daban_review.metrics.pattern_blacklist import _next_day_bad
+        bars = pd.DataFrame([
+            {"date": "20260101", "close": 10.0, "open": 10.0, "high": 10, "low": 10, "vol": 100},
+            {"date": "20260102", "close": 10.5, "open": 10.5, "high": 11, "low": 10, "vol": 100},
+        ])
+        assert _next_day_bad("000001", "20260101", {}, lambda c: bars) is False

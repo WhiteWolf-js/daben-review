@@ -18,6 +18,7 @@ GAP_TOO_HIGH = 7.0      # 溢价过高:一步到位,接力赔率差
 GAP_TOO_LOW = 2.0       # 高开不足:情绪偏弱
 AMT_OK_YI = 0.5         # 竞价成交额达标线(亿):低于此的高开是"没人接的假强"
 TREND_EPS = 0.3         # 变化方向阈值(百分点),小于此视为持平
+BIG_BID_VOL = 200_000   # 竞价买一挂单 >20W手 = 疑似量化大单(口径同 candidate_pool.BIG_BID_VOL)
 
 _GRADE_UP = {"D": "C", "C": "B", "B": "A", "A": "A+", "A+": "A+"}
 _GRADE_DOWN = {"A+": "A", "A": "B", "B": "C", "C": "D", "D": "D"}
@@ -101,6 +102,7 @@ def live_rows(
             "bid_ask_ratio": round(bid_vol / ask_vol, 2) if ask_vol > 0 else None,
             "theme": themes.get(code, []),
             "in_candidates": code in cands,
+            "risk_flags": (["量化大单"] if bid_vol > BIG_BID_VOL else []),
         })
     out.sort(key=lambda r: r["gap_pct"], reverse=True)
     return out

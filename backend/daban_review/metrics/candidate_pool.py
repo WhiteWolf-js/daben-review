@@ -14,14 +14,22 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import pandas as pd
 
+from .kline import volume_ratio
 from .ladder import passive_map, stock_profiles
+from .pattern_blacklist import get_blacklist
 from .score import _first_seal_minutes, grade_candidate
 from .sector import theme_heat
+from ..data import store
 
 # 与 service.CANDIDATE_STYLES 同名同序(前端展示顺序也依赖它)
 STYLES = ["低位连板接力", "首板打板", "题材情绪龙头", "高位龙头接力"]
+
+# 缩量与竞价大单阈值(口径同 kline.py / pattern_blacklist.py)
+SHRINK_VR = 0.8          # vr < 此值 = 缩量
+BIG_BID_VOL = 200_000    # 竞价买一挂单 >20W手 = 疑似量化大单
 
 
 def _unplayable(item: dict) -> int:
@@ -37,11 +45,45 @@ def _unplayable(item: dict) -> int:
     return 1 if (0 < turnover < 1.0 and item.get("theme_rank") is None) else 0
 
 
+def _shrink_penalty(item: dict) -> int:
+    """缩量降权:非缩量0 / 一二板缩量1 / 三板及以上缩量2。
+
+    三板缩量比一二板更危险(高度+缩量=接力断档,炸板低开风险更高),所以更重。
+    排在 _unplayable 之后:一字锁死的消息面独苗仍是更高优先级的「打不了」。
+    """
+    if not item.get("is_shrink"):
+        return 0
+    return 2 if int(item.get("boards") or 0) >= 3 else 1
+
+
+def _bigbid_penalty(item: dict) -> int:
+    """竞价大单降权(量化票特征):挂单 > BIG_BID_VOL → 1,沉到同档非量化票后面。
+
+    比缩量轻:量化大单是「特征」不是「定罪」,降权沉底但保留(不像黑名单那样硬排)。
+    """
+    return 1 if item.get("is_bigbid") else 0
+
+
+def _risk_flags(item: dict) -> list[str]:
+    """给前端/agent 可见的风险标注(只展示,不参与排序)。"""
+    flags: list[str] = []
+    if item.get("is_shrink"):
+        b = int(item.get("boards") or 0)
+        flags.append(f"缩量{b}板" if b else "缩量")
+    if item.get("is_bigbid"):
+        flags.append("量化大单")
+    return flags
+
+
 def _sort_key(item: dict) -> tuple:
-    """确定性排序:可打性 → 分数降 → 封流比降 → 首封早 → 代码升。最后一项保证无并列歧义。"""
+    """确定性排序:可打性 → 缩量 → 竞价大单 → 分数降 → 封流比降 → 首封早 → 代码升。
+
+    末项保证无并列歧义(同样输入必得同样池,保复现性)。"""
     fmin = _first_seal_minutes(item.get("first_seal", ""))
     return (
         _unplayable(item),
+        _shrink_penalty(item),
+        _bigbid_penalty(item),
         -int(item.get("score") or 0),
         -float(item.get("seal_strength") or 0.0),
         fmin if fmin is not None else 9999,
@@ -77,6 +119,7 @@ def build_candidate_pool(
     top: int = 5,
     theme_top: int = 5,
     prev_zbgc: set[str] | None = None,
+    today: str | None = None,
 ) -> dict:
     """构造四风格候选池。
 
@@ -102,14 +145,29 @@ def build_candidate_pool(
     ranks = _theme_ranks(theme_rank)
     hot_themes = [t for t, r in ranks.items() if r <= theme_top]
 
+    # today:优先入参,否则从 limitup 的 date 列(落库时存的)推断,再否则今天。
+    # 候选池缩量/竞价/黑名单都依赖它;取不到时安全退化为不判(同旧行为)。
+    if today is None and not lim.empty and "date" in lim.columns:
+        today = str(lim["date"].iloc[0])
+    if today is None:
+        today = dt.date.today().strftime("%Y%m%d")
+
     # 全池打分(纯规则,与次日验证同口径)
+    bl = get_blacklist(today)                # 历史模式黑名单(硬排除)
+    bid_vols = store.auction_bid_vols(today)  # 竞价大单(降权)
     scored: list[dict] = []
     zb = prev_zbgc or set()
     profs = stock_profiles(lim)
     # 被动上板度:用**全部 ≥2 只**的题材(不是 theme_rank 用的 top12),与回测口径一致
     passive = passive_map(profs, themes, [t["theme"] for t in theme_heat(pools, themes, top=9999)])
     for p in profs:
-        p = {**p, "w2s": p["code"] in zb, "passive": passive.get(p["code"])}
+        if p["code"] in bl:
+            continue  # 历史模式命中(缩量→次日炸板/低开/一字≥2次):硬排除,不进池
+        vr = volume_ratio(p["code"], today)
+        p = {**p, "w2s": p["code"] in zb, "passive": passive.get(p["code"]),
+             "vr": vr,
+             "is_shrink": vr is not None and vr < SHRINK_VR,
+             "is_bigbid": bid_vols.get(p["code"], 0) > BIG_BID_VOL}
         g = grade_candidate(p, phase)
         my_themes = themes.get(p["code"], [])
         scored.append({
@@ -120,6 +178,7 @@ def build_candidate_pool(
             "grade": g["grade"],
             "position": g["position"],
             "reasons": g["reasons"],
+            "risk_flags": _risk_flags(p),
         })
 
     def _pick(pred) -> list[dict]:

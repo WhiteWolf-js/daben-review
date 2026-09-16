@@ -68,6 +68,17 @@ _YIZI_MIN = 9 * 60 + 25
 INDUSTRY_MIN_COUNT = 3  # 行业分布里低于此数的并进「其他」
 
 
+def is_yizi(first_seal, break_times: int = 0) -> bool:
+    """一字板:集合竞价即涨停(首封≤9:25)且全天不破板(炸板0次)。
+
+    口径唯一源 —— ladder_board 天梯图、candidate_pool 历史模式黑名单扫描都复用此判据,
+    别在别处再手写 ``fm <= _YIZI_MIN and break_times == 0``。一字后炸了又回封的,
+    首封虽 ≤9:25 但 break_times>0 → 不算一字(回封票,质量打折)。
+    """
+    fm = _seal_minutes(first_seal)
+    return fm is not None and fm <= _YIZI_MIN and break_times == 0
+
+
 # 只画「昨日≥2板今日断板」的票:昨日首板今日断板每天几十只、无信息量,画上去会淹掉 2 板档
 BROKEN_MIN_PREV_BOARDS = 2
 
@@ -161,6 +172,7 @@ def cell_sector(
     themes: dict[str, list[str]] | None,
     prev_themes: dict[str, list[str]] | None,
     hot_rank: dict[str, int] | None,
+    concept_quotes: dict[str, dict] | None = None,
 ) -> tuple[str, bool]:
     """个股在天梯格子里显示的「所属板块」→ (标签, 是否真板块)。
 
@@ -170,15 +182,26 @@ def cell_sector(
 
     四级回退(实测 0804 逐级累计覆盖 82% → 99% → 100% → 兜底):
     1. 该股今日题材里**当天真形成板块效应**的(hot_rank 来自 theme_heat 的 ≥2 只题材),
-       取热度最好的那个 → 返回 True
-    2. 榜外的今日题材(只此一只的碎片标签)→ 返回 False
+       取热度最好的那个 → 若能映射到 concept_quotes 宽方向名则使用宽名 → 返回 True
+    2. 榜外的今日题材(碎片标签)→ 同样宽化(只用静态根词)、返回 False;
+       宽化后同名满 2 只的,由 `ladder_board` 的后置扫描升成 True
     3. 今日无题材(断板票今天没涨停,自然没有涨停原因)→ 用**昨日**题材同样处理。
        语义也对:「昨日连板今日断板」问的就是它昨天靠什么涨的
     4. 都没有 → 行业(去罗马后缀),返回 False
 
     第二个返回值供前端分层:真板块亮色、碎片/昨日暗一档 —— 一眼看出哪些票有板块托底、
     哪些是孤票,正对应方法论里「有无同题材联动票同步」。
+
+    宽化分两档,**冷题材只吃静态根词、不吃 concept_quotes**:
+    - 热题材(在 hot_rank 里)→ 静态根词 + THS 日榜宽名都可用
+    - 冷题材 → 只用静态根词(`broad_concept_name(t, {})`)。日榜里混着
+      「专精特新」「中报预增」这类泛标签,给冷票套上去会把无关股票错误聚合;
+      而 `_BROAD_ROOTS` 是人工筛的真方向词,不存在这个风险。
+      不宽化冷票会造成死循环:因为没成板块所以不宽化、因为不宽化所以凑不到一起
+      (实测 002713「算力集成」+ 002418「算力」各 1 只,合并后就是算力 2 只)。
     """
+    from .sector import broad_concept_name
+
     rank = hot_rank or {}
     for src in (themes, prev_themes):
         ts = (src or {}).get(code) or []
@@ -186,8 +209,14 @@ def cell_sector(
             continue
         hot = sorted((rank[t], t) for t in ts if t in rank)
         if hot:
-            return hot[0][1], True
-        return ts[0], False  # 有题材但都不成板块 → 碎片标签
+            # 热度第一的题材定身份,宽化只是给它换个名字 —— 宽化失败就用原名,
+            # **不能顺着 hot 往下找"能宽化的那个"**:`_BROAD_ROOTS` 是人工列表必然不全,
+            # 那样写会让没收录的真热门方向(东数西算…)被次热题材系统性顶掉。
+            # 不宽化也不损失聚合:宽名满 2 只由 `ladder_board` 后置扫描升 True。
+            top = hot[0][1]
+            return (broad_concept_name(top, concept_quotes or {}) or top), True
+        # 有题材但都不成板块 → 碎片标签,只用静态根词宽化(不传 quotes)
+        return broad_concept_name(ts[0], {}) or ts[0], False
     return _clean_industry(industry), False
 
 
@@ -197,6 +226,7 @@ def ladder_board(
     themes: dict[str, list[str]] | None = None,
     prev_themes: dict[str, list[str]] | None = None,
     hot_themes: list[str] | None = None,
+    concept_quotes: dict[str, dict] | None = None,
 ) -> dict:
     """天梯图数据:每档 = 今日封住的票 + **昨日连板今日断板的票**,外加行业分布。
 
@@ -220,7 +250,7 @@ def ladder_board(
     hot_rank = {t: i for i, t in enumerate(hot_themes or [])}
 
     def _sector(code: str, industry: str) -> dict:
-        label, is_hot = cell_sector(code, industry, themes, prev_themes, hot_rank)
+        label, is_hot = cell_sector(code, industry, themes, prev_themes, hot_rank, concept_quotes)
         return {"sector": label, "sector_hot": is_hot}
 
     sealed_codes: set[str] = set()
@@ -240,7 +270,7 @@ def ladder_board(
                 "first_seal": p["first_seal"], "last_seal": p["last_seal"],
                 "seal_minutes": mins,  # 排序与展示都用最终封板
                 # 真一字要求全天没开板:一字后炸了又回封的,该显示回封时间而不是标一字
-                "is_yizi": first_min is not None and first_min <= _YIZI_MIN and p["break_times"] == 0,
+                "is_yizi": is_yizi(p["first_seal"], p["break_times"]),
                 "break_times": p["break_times"],  # >0 = 炸过又回封,质量打折
                 "seal_strength": p["seal_strength"], "pct": p["pct"],
                 "broken": False,
@@ -281,6 +311,22 @@ def ladder_board(
                 sealed_codes.add(code)
                 continue
             by_board.setdefault(pb + 1, []).append({**base, "broken": True})
+
+    # 后置扫描:宽化后满 2 只的**宽方向名**升成「真板块」。
+    # hot_rank 是按原始细粒度题材算的 ≥2 只,宽化会把细分标签合到一起(算力集成+算力→算力),
+    # 这批新形成的板块效应只能在全表拼完后才看得出来。只认 _BROAD_ROOTS 里的名字 ——
+    # 碎片标签之间的偶然同名(如两只都叫「重组」)不是方向,不该升级。
+    from .sector import _BROAD_ROOTS
+
+    broad_counts: dict[str, int] = {}
+    for cells in by_board.values():
+        for s in cells:
+            if s["sector"] in _BROAD_ROOTS:
+                broad_counts[s["sector"]] = broad_counts.get(s["sector"], 0) + 1
+    for cells in by_board.values():
+        for s in cells:
+            if not s["sector_hot"] and broad_counts.get(s["sector"], 0) >= 2:
+                s["sector_hot"] = True
 
     # 档内排序:先封住的(按首封时间早→晚),炸板的排最后
     for b in by_board:

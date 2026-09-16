@@ -36,8 +36,10 @@ def _daily_job() -> None:
     try:
         from . import poster
 
-        r = poster.render_and_push(date)
-        log.info("盘后海报:path=%s pushed=%s", r["path"], r["pushed"])
+        r = poster.render_and_push(date)  # 复盘海报
+        log.info("盘后复盘海报:path=%s pushed=%s", r["path"], r["pushed"])
+        r2 = poster.render_and_push(date, kind="ladder")  # 连板天梯图
+        log.info("盘后天梯图:path=%s pushed=%s", r2["path"], r2["pushed"])
     except Exception as e:  # noqa: BLE001
         log.error("盘后海报出图/推送失败: %s", e)
 
@@ -76,14 +78,14 @@ def _warm_name_table() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 交易日 15:30 盘后自动生成
-    _scheduler.add_job(_daily_job, "cron", day_of_week="mon-fri", hour=15, minute=30,
+    # 交易日 15:15 盘后自动生成(收盘后 15 分钟内推天梯图 + 复盘)
+    _scheduler.add_job(_daily_job, "cron", day_of_week="mon-fri", hour=15, minute=15,
                        id="daily_review", replace_existing=True)
     # 交易日 9:25:30 竞价定格后出盘前决策图(开盘前几分钟能看到)
     _scheduler.add_job(_auction_job, "cron", day_of_week="mon-fri", hour=9, minute=25, second=30,
                        id="auction_brief", replace_existing=True)
     _scheduler.start()
-    log.info("调度器启动:盘前 9:25:30 竞价决策图 + 盘后 15:30 自动复盘")
+    log.info("调度器启动:盘前 9:25:30 竞价决策图 + 盘后 15:15 天梯图+复盘")
     _warm_name_table()
     yield
     _scheduler.shutdown(wait=False)
@@ -139,6 +141,12 @@ def intraday_rotation(date: str):
     首次算某一天要拉 200+ 只分时(约 15s),之后走库里缓存。
     """
     return service.get_intraday_rotation(date)
+
+
+@app.get("/api/abnormal/{date}")
+def abnormal(date: str, window: int = 10):
+    """N 日累计涨幅异动榜(翻倍/两倍/进入异动区)。历史日走缓存,首次拉几百只日线约 30–90s。"""
+    return service.get_abnormal_rank(date, window)
 
 
 @app.get("/api/emotion-series")

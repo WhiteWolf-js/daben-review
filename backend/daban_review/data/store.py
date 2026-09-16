@@ -3,14 +3,26 @@
 import datetime as dt
 import json
 import sqlite3
+from contextlib import closing
 
 import pandas as pd
 
 from ..config import CONFIG
 
 
+_BUSY_TIMEOUT_S = 30
+
+
 def get_conn(db_path: str | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path or CONFIG.db_path, check_same_thread=False)
+    """开库连接。**写入方一律用 `with closing(get_conn()) as conn:`**,别裸 open/close。
+
+    `timeout` 即 SQLite 的 busy_timeout:后端 / CLI / watcher / bot 四个进程并发写同一个库,
+    撞上写锁时默认只等 5s 就抛 `database is locked` 硬失败(盘中 watcher 那一轮就白跑了)。
+    但它只救**短暂**争用 —— 对方要是攥着事务不放,等多久都没用,所以写函数那边必须配合:
+    先算完再开事务,且用 closing 保证异常路径也释放。
+    """
+    conn = sqlite3.connect(db_path or CONFIG.db_path, check_same_thread=False,
+                           timeout=_BUSY_TIMEOUT_S)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -75,22 +87,21 @@ def save_live(date: str, snapshot: dict, index_state: dict | None = None,
         "hot_top5": hot,
         "index": index_state or {},
     }
-    conn = get_conn()
-    _ensure_live(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO live_snapshot(date, payload, updated_at) VALUES(?,?,?)",
-        (date, json.dumps(payload, ensure_ascii=False),
-         dt.datetime.now().isoformat(timespec="seconds")),
-    )
-    for ev in events or []:
+    with closing(get_conn()) as conn:
+        _ensure_live(conn)
         conn.execute(
-            "INSERT OR IGNORE INTO live_events(date, ts, type, title, detail, key) "
-            "VALUES(?,?,?,?,?,?)",
-            (date, payload["ts"], ev.get("type", ""), ev.get("title", ""),
-             ev.get("detail", ""), ev.get("key", "")),
+            "INSERT OR REPLACE INTO live_snapshot(date, payload, updated_at) VALUES(?,?,?)",
+            (date, json.dumps(payload, ensure_ascii=False),
+             dt.datetime.now().isoformat(timespec="seconds")),
         )
-    conn.commit()
-    conn.close()
+        for ev in events or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO live_events(date, ts, type, title, detail, key) "
+                "VALUES(?,?,?,?,?,?)",
+                (date, payload["ts"], ev.get("type", ""), ev.get("title", ""),
+                 ev.get("detail", ""), ev.get("key", "")),
+            )
+        conn.commit()
 
 
 def get_live() -> dict:
@@ -139,19 +150,18 @@ def save_auction_snapshot(date: str, ts: str, quotes: dict[str, dict]) -> None:
     """记一轮竞价快照(ts=HH:MM:SS)。同轮重复写按 UNIQUE 忽略。"""
     if not quotes:
         return
-    conn = get_conn()
-    _ensure_auction(conn)
-    conn.executemany(
-        "INSERT OR IGNORE INTO auction_snapshot(date, ts, code, price, amount, bid_vol, ask_vol) "
-        "VALUES(?,?,?,?,?,?,?)",
-        [
-            (date, ts, code, q.get("price", 0), q.get("amount", 0),
-             q.get("bid_vol1", 0), q.get("ask_vol1", 0))
-            for code, q in quotes.items()
-        ],
-    )
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn:
+        _ensure_auction(conn)
+        conn.executemany(
+            "INSERT OR IGNORE INTO auction_snapshot(date, ts, code, price, amount, bid_vol, ask_vol) "
+            "VALUES(?,?,?,?,?,?,?)",
+            [
+                (date, ts, code, q.get("price", 0), q.get("amount", 0),
+                 q.get("bid_vol1", 0), q.get("ask_vol1", 0))
+                for code, q in quotes.items()
+            ],
+        )
+        conn.commit()
 
 
 def read_auction_series(date: str) -> dict[str, list[dict]]:
@@ -166,6 +176,25 @@ def read_auction_series(date: str) -> dict[str, list[dict]]:
     for code, ts, price, amount in rows:
         out.setdefault(code, []).append({"ts": ts, "price": price, "amount": amount})
     return out
+
+
+def auction_bid_vols(date: str) -> dict[str, float]:
+    """某日每只票竞价期间的最大买一挂单量(手)→ {code: max_bid_vol}。
+
+    供候选池识别「竞价挂 20W 手大单」的量化票(阈值见 candidate_pool.BIG_BID_VOL)。
+    表无数据返回空 dict(候选池据此退化为不判大单,不阻断构建)。
+    """
+    conn = get_conn()
+    _ensure_auction(conn)
+    try:
+        rows = conn.execute(
+            "SELECT code, MAX(bid_vol) FROM auction_snapshot WHERE date=? GROUP BY code",
+            (date,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        rows = []
+    conn.close()
+    return {str(c): float(v) for c, v in rows if c and v}
 
 
 # ---- 弱转强判据用:前一交易日 + 当日炸板名单 ----
@@ -210,14 +239,14 @@ def _ensure_rotation(conn: sqlite3.Connection) -> None:
 
 def save_rotation(date: str, payload: dict) -> None:
     """存当日盘中切换结果(整块 JSON)。重算覆盖旧的。"""
-    conn = get_conn()
-    _ensure_rotation(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO intraday_rotation(date, json, created_at) VALUES(?,?,?)",
-        (date, json.dumps(payload, ensure_ascii=False), dt.datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn:
+        _ensure_rotation(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO intraday_rotation(date, json, created_at) VALUES(?,?,?)",
+            (date, json.dumps(payload, ensure_ascii=False),
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
 
 
 def read_rotation(date: str) -> dict | None:
@@ -225,6 +254,45 @@ def read_rotation(date: str) -> dict | None:
     conn = get_conn()
     _ensure_rotation(conn)
     row = conn.execute("SELECT json FROM intraday_rotation WHERE date=?", (date,)).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        return json.loads(row[0])
+    except ValueError:
+        return None
+
+
+# ---- 异动榜单(N日累计涨幅):历史日永不变,落库复用 ----
+
+def _ensure_abnormal(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS abnormal_rank ("
+        "date TEXT, window INTEGER, json TEXT, created_at TEXT, "
+        "PRIMARY KEY (date, window))"
+    )
+    conn.commit()
+
+
+def save_abnormal(date: str, window: int, payload: dict) -> None:
+    """存当日异动榜(整块 JSON,按 window 区分)。重算覆盖旧的。"""
+    with closing(get_conn()) as conn:
+        _ensure_abnormal(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO abnormal_rank(date, window, json, created_at) VALUES(?,?,?,?)",
+            (date, window, json.dumps(payload, ensure_ascii=False),
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+
+
+def read_abnormal(date: str, window: int) -> dict | None:
+    """读缓存;没有返回 None。历史日的累计涨幅永不变,算一次就够(一次要拉几百只日线)。"""
+    conn = get_conn()
+    _ensure_abnormal(conn)
+    row = conn.execute(
+        "SELECT json FROM abnormal_rank WHERE date=? AND window=?", (date, window)
+    ).fetchone()
     conn.close()
     if not row or not row[0]:
         return None
@@ -263,15 +331,15 @@ def save_stock_names(name_to_code: dict[str, str]) -> int:
     import datetime as dt
 
     now = dt.datetime.now().isoformat(timespec="seconds")
-    conn = get_conn()
-    _ensure_stock_names(conn)
-    conn.execute("DELETE FROM stock_names")
-    conn.executemany(
-        "INSERT OR REPLACE INTO stock_names(name, code, updated_at) VALUES(?,?,?)",
-        [(name, code, now) for name, code in name_to_code.items()],
-    )
-    conn.commit()
-    conn.close()
+    # DELETE + 重灌必须在同一个事务里:中途抛异常时 closing 会回滚,不会留下一张空名录
+    with closing(get_conn()) as conn:
+        _ensure_stock_names(conn)
+        conn.execute("DELETE FROM stock_names")
+        conn.executemany(
+            "INSERT OR REPLACE INTO stock_names(name, code, updated_at) VALUES(?,?,?)",
+            [(name, code, now) for name, code in name_to_code.items()],
+        )
+        conn.commit()
     return len(name_to_code)
 
 
@@ -322,18 +390,17 @@ def _ensure_usage(conn: sqlite3.Connection) -> None:
 
 def save_usage(date: str, kind: str, cost: dict, code: str = "") -> None:
     """记一次调用用量。cost 为 pricing.compute_cost 的返回 dict;kind ∈ review/chat/holding/ocr。"""
-    conn = get_conn()
-    _ensure_usage(conn)
-    conn.execute(
-        "INSERT INTO usage_log(date, kind, code, input_tokens, output_tokens, cache_read, "
-        "cache_write, cost_usd, cost_cny, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (date, kind, code, cost.get("input_tokens", 0), cost.get("output_tokens", 0),
-         cost.get("cache_read", 0), cost.get("cache_write", 0),
-         cost.get("cost_usd", 0.0), cost.get("cost_cny", 0.0),
-         dt.datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn:
+        _ensure_usage(conn)
+        conn.execute(
+            "INSERT INTO usage_log(date, kind, code, input_tokens, output_tokens, cache_read, "
+            "cache_write, cost_usd, cost_cny, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (date, kind, code, cost.get("input_tokens", 0), cost.get("output_tokens", 0),
+             cost.get("cache_read", 0), cost.get("cache_write", 0),
+             cost.get("cost_usd", 0.0), cost.get("cost_cny", 0.0),
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
 
 
 def get_usage_today(kinds: tuple[str, ...] = ("review", "holding", "ocr")) -> dict:
@@ -351,3 +418,45 @@ def get_usage_today(kinds: tuple[str, ...] = ("review", "holding", "ocr")) -> di
     conn.close()
     return {"count": row[0], "cost_usd": round(row[1], 4),
             "cost_cny": round(row[2], 4), "total_tokens": int(row[3])}
+
+
+# ---- 缩量→次日问题模式黑名单:扫一次落库,候选池构建时只读 ----
+
+def _ensure_pattern_blacklist(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS pattern_blacklist ("
+        "date TEXT PRIMARY KEY, codes TEXT, created_at TEXT)"
+    )
+    conn.commit()
+
+
+def save_blacklist(date: str, codes: set[str]) -> None:
+    """落库某日黑名单(整块 JSON,按 date 覆盖)。
+
+    空集也写(代表已扫过),否则次日复跑会重扫几百次 daily_bars。
+    """
+    with closing(get_conn()) as conn:
+        _ensure_pattern_blacklist(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO pattern_blacklist(date, codes, created_at) VALUES(?,?,?)",
+            (date, json.dumps(sorted(codes), ensure_ascii=False),
+             dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.commit()
+
+
+def read_blacklist(date: str) -> set[str] | None:
+    """读某日黑名单缓存;表无当日行返回 None(调用方据此决定是否重扫)。
+
+    返回 set() 与 None 的区别:None=从没扫过,set()=扫过且无命中(都该直接用,不重扫)。
+    """
+    conn = get_conn()
+    _ensure_pattern_blacklist(conn)
+    row = conn.execute("SELECT codes FROM pattern_blacklist WHERE date=?", (date,)).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        return set(json.loads(row[0]))
+    except ValueError:
+        return None

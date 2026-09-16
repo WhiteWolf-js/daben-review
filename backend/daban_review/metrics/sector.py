@@ -17,6 +17,41 @@ _SUFFIX = re.compile(r"(概念板块|概念股|概念|板块|指数)$")
 _BRACKET = re.compile(r"[(（][^)）]*[)）]")
 _YEAR_PREFIX = re.compile(r"^(19|20)\d{2}\s*")
 
+# 宽方向根词(有序,靠前优先级高)。
+# 规则:_norm_name(hot_rank 题材) 含某根词 → 展示该根词。
+# 长词排前,避免 "AI算力" 被 2 字 "AI" 截断;每组内从具体到宽泛。
+_BROAD_ROOTS: list[str] = [
+    # AI/算力
+    "数据中心",
+    "光模块",
+    "液冷",
+    "算力",
+    "存储芯片",
+    "芯片",
+    "半导体",
+    "机器人",
+    "人工智能",
+    "华为",
+    "鸿蒙",
+    # 新能源
+    "储能",
+    "光伏",
+    "风电",
+    "锂电",
+    "新能源",
+    # 军工/航天
+    "卫星",
+    "低空",
+    "军工",
+    "航空",
+    # 大宗
+    "黄金",
+    "白银",
+    # 医药
+    "创新药",
+    "中药",
+]
+
 
 def _norm_name(s: str) -> str:
     s = _BRACKET.sub("", str(s)).strip()
@@ -40,6 +75,32 @@ def match_quote(theme: str, quotes: dict[str, dict]) -> dict | None:
     for k, v in norm.items():
         if len(k) >= 3 and (t in k or k in t):
             return v
+    return None
+
+
+def broad_concept_name(theme: str, quotes: dict[str, dict]) -> str | None:
+    """把细粒度题材名映射到宽粒度方向名。
+
+    两级匹配(静态根词优先,保证宽化效果):
+    1. _BROAD_ROOTS 静态根词:「液冷服务器」→「液冷」,「算力集成」→「算力」
+    2. concept_quotes key 集合(动态 top-20):兜底映射到 THS 日榜方向名
+    """
+    if not theme:
+        return None
+    t = _norm_name(theme)
+    # 1. static root (highest priority — ensures coarsening regardless of concept_quotes content)
+    for root in _BROAD_ROOTS:
+        if root in t:
+            return root
+    # 2. concept_quotes match (dynamic daily top-20)
+    for key in (quotes or {}):
+        k = _norm_name(key)
+        if not k:
+            continue
+        if t == k:
+            return k
+        if len(t) >= 3 and len(k) >= 3 and (t in k or k in t):
+            return k
     return None
 
 

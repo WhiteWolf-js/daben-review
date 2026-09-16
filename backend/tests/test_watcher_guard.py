@@ -145,3 +145,43 @@ class TestSessionUnchanged:
     ])
     def test_in_rush(self, hhmm, expect):
         assert watcher._in_rush(dt.time(*hhmm)) is expect
+
+
+class TestWatchdog:
+    """看门狗:到 15:05 无条件 `os._exit`,主循环卡死也拦不住它。
+
+    存在的理由:主循环的 `now > _CLOSE` 判据只在每轮开头生效,`poll_once` 的 try/except
+    只拦异常不拦挂起。2026-09-11 某个网络调用卡死后,进程活了 5 天不退不写日志,而 launchd
+    的 StartCalendarInterval 见进程还在就不再拉起 —— 后面 3 个交易日整天无监控。
+    """
+
+    def _run(self, monkeypatch, now, stop_at):
+        """跑一次 _watchdog,返回 (sleep 了多少秒, 是否调用了 os._exit)。"""
+        slept, exited = [], []
+
+        class FakeDT(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        monkeypatch.setattr(watcher.dt, "datetime", FakeDT)
+        monkeypatch.setattr(watcher.time, "sleep", lambda s: slept.append(s))
+        monkeypatch.setattr(watcher.os, "_exit", lambda c: exited.append(c))
+        watcher._watchdog(stop_at)
+        return (slept[0] if slept else None), bool(exited)
+
+    def test_sleeps_until_stop_then_exits(self, monkeypatch):
+        slept, exited = self._run(
+            monkeypatch, dt.datetime(2026, 9, 16, 9, 20, 0), dt.time(15, 5))
+        assert slept == (15 * 3600 + 5 * 60) - (9 * 3600 + 20 * 60)  # 09:20 → 15:05
+        assert exited
+
+    def test_noop_when_already_past(self, monkeypatch):
+        """手动补跑(已过 15:05)时不该立刻杀进程 —— 主循环自己会 break。"""
+        slept, exited = self._run(
+            monkeypatch, dt.datetime(2026, 9, 16, 16, 0, 0), dt.time(15, 5))
+        assert slept is None and not exited
+
+    def test_default_stop_is_after_close(self):
+        """强制退出点必须晚于收盘,否则会掐掉正常的最后一轮。"""
+        assert watcher._HARD_STOP > watcher._CLOSE

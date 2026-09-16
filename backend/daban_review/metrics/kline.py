@@ -94,3 +94,31 @@ def build_hot_klines(stocks: list[dict], date: str, n_days: int = 12) -> list[di
             "bars": bars,
         })
     return out
+
+
+def volume_ratio(code: str, date: str, df=None) -> float | None:
+    """某票某日量比 = 当日量 / 近5日均量(口径同 ``_bar_features`` 里的 vr)。
+
+    抽成单点函数供候选池缩量降权与历史模式扫描复用,口径单一。日线不足6根、
+    无当日行或拉取失败返回 None(调用方据此视为「量能不可判」,不当缩量处理)。
+
+    df 可注入预取的日线(批量扫描时复用同一份,避免重复拉 daily_bars);不传则自取8根。
+    """
+    if df is None:
+        try:
+            df = daily_bars(code, 8)
+        except Exception:  # noqa: BLE001 单票拉取失败不阻断调用方
+            return None
+    if df is None or df.empty:
+        return None
+    d = df.reset_index(drop=True)
+    idx = d.index[d["date"] == date]
+    if not len(idx):
+        return None
+    i = int(idx[0])
+    v = float(d.iloc[i]["vol"])
+    vols = [float(d.iloc[j]["vol"]) for j in range(max(0, i - 5), i)]
+    if not vols:
+        return None
+    avg = sum(vols) / len(vols)
+    return round(v / avg, 2) if avg else 1.0

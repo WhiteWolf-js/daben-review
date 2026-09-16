@@ -48,6 +48,27 @@ def _fmt_rate(v) -> str:
     return f"{v:.1%}" if isinstance(v, (int, float)) else "—"
 
 
+_TIER_LABEL = {"triple": "🔥两倍", "double": "🚀翻倍", "entering": "↑进入", "warm": ""}
+
+
+def _print_abnormal(rank: dict) -> None:
+    print(f"\n=== 异动榜 · {rank['window']}日累计涨幅(fetched={rank['fetched']}) ===")
+    rows = rank.get("rows", [])
+    if not rows:
+        print("  (空,可能该日涨停池未入库)")
+        return
+    print(f"  {'代码':<7}{'名称':<8}{'累计':>9}{'今日':>8}{'连板':>5}  板块")
+    for r in rows[:30]:
+        tag = _TIER_LABEL.get(r["tier"], "")
+        print(
+            f"  {r['code']:<7}{r['name']:<8}"
+            f"{r['pct_window']*100:>8.1f}%{r['pct_today']*100:>7.1f}%"
+            f"{r['boards']:>5}  {r['industry'] or '—'} {tag}"
+        )
+    if len(rows) > 30:
+        print(f"  …+{len(rows) - 30}")
+
+
 def _print_ladder(ladder: dict) -> None:
     print("\n=== 连板天梯 ===")
     for board, stocks in ladder.items():
@@ -63,8 +84,9 @@ def _print_ladder(ladder: dict) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     p = argparse.ArgumentParser(prog="daban_review")
-    p.add_argument("cmd", choices=["review", "emotion", "ladder", "fetch", "analyze", "backtest"])
+    p.add_argument("cmd", choices=["review", "emotion", "ladder", "fetch", "analyze", "backtest", "abnormal"])
     p.add_argument("date", nargs="?", default=_today(), help="YYYYMMDD,默认今天")
+    p.add_argument("--window", type=int, default=10, help="异动榜窗口天数,默认10")
     args = p.parse_args()
 
     if args.cmd == "backtest":
@@ -88,6 +110,12 @@ def main() -> None:
         _print_emotion(compute_emotion(pools))
     if args.cmd in ("review", "ladder"):
         _print_ladder(build_ladder(pools["limitup"]))
+
+    if args.cmd == "abnormal":
+        from .app.service import get_abnormal_rank  # 延迟导入,避免拖慢纯数据命令
+        window = int(getattr(args, "window", 10))
+        rank = get_abnormal_rank(args.date, window)
+        _print_abnormal(rank)
 
 
 if __name__ == "__main__":

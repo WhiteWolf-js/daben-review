@@ -8,6 +8,7 @@ import ThemePanel from "../components/ThemePanel";
 import LadderView from "../components/LadderView";
 import IntradayRotation from "../components/IntradayRotation";
 import CandidatePanel from "../components/CandidatePanel";
+import AbnormalPanel from "../components/AbnormalPanel";
 import ReportSummary from "../components/ReportSummary";
 import ReportBody from "../components/ReportBody";
 import HoldingAnalysis from "../components/HoldingAnalysis";
@@ -70,6 +71,11 @@ export default function PostMarketView({
           subtitle="agent 产出 + 规则分级(A+~D)"
         />
       ),
+    },
+    {
+      id: "abnormal",
+      label: "异动榜",
+      content: <AbnormalPanel date={date} onPick={(s) => onPick(s as Stock)} />,
     },
     ...(emotion
       ? [
