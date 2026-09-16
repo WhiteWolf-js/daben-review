@@ -383,9 +383,18 @@ def candidate_outcome(code: str, base_date: str) -> dict | None:
     """候选次日验证:隔日溢价 = 次日开盘/当日收盘(涨停价)−1。
 
     次日尚未开盘返回 None。close_prem 仅次日 15:00 后才填入，盘中返回 None 避免锁入脏数据。
+
+    **当日(或未来日)直接短路,不要联网。** 否则「看今天的候选」这条最热的路径每只都要先拉
+    12 根日线(mootdx 约 2.8s/只)才能得出「次日还没开盘」这个本来就已知的结论,而且因为
+    open_prem 一直是 None、永远不会被回填缓存,每次请求都重付一遍 —— 实测 3 只候选让
+    `/api/candidates/<今天>` 要 8.5s,海报弹窗打开后「明日候选」那一块要等 8 秒才出现,
+    用户在这之前点下载就导出了一张缺板块的图。
     """
     import datetime as _dt
     from ..data.akshare_client import daily_bars
+
+    if base_date >= _dt.date.today().strftime("%Y%m%d"):
+        return None
 
     try:
         d = daily_bars(code, 12)

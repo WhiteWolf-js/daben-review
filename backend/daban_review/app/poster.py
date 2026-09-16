@@ -20,10 +20,9 @@ POSTER_DIR = DATA_DIR / "posters"
 _READY = '[data-poster-root="1"][data-poster-ready="1"]'
 
 
-_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯", "holding": "持仓处置", "album": "图集"}
+_KIND_NAME = {"review": "复盘", "auction": "盘前竞价", "ladder": "连板天梯", "holding": "持仓处置"}
 # 天梯图首板档要排 8 列,比复盘/竞价海报宽(与 LadderPoster.LADDER_WIDTH 对齐)
 # 持仓处置图 1080 宽(HoldingPoster.HOLDING_WIDTH),默认 1200 视口够用,不必单列
-# 图集卡片 1080 宽(AlbumPoster.ALBUM_W),1200 视口够用
 _KIND_VIEWPORT = {"ladder": 1400}
 
 
@@ -78,52 +77,6 @@ def render_poster(
 
     log.info("海报已生成: %s", out)
     return str(out)
-
-
-def render_album(date: str, out_dir: str | Path | None = None) -> list[str]:
-    """抖音图集:遍历 ``[data-poster-card]`` 逐张截图,返回 PNG 路径列表。
-
-    输出 ``图集_<date>_1.png .. _N.png``(每张 1080×1440 @2x = 2160×2880,3:4 竖屏)。
-    前端 ``?poster=<date>&kind=album`` 渲染 AlbumPoster,每张卡片打 data-poster-card。
-    与 render_poster 不同:这里截多个 card 元素而非单个 root,返回路径列表。
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        log.error("未安装 playwright,无法出图(pip install playwright)")
-        return []
-
-    out_d = Path(out_dir) if out_dir else POSTER_DIR
-    out_d.mkdir(parents=True, exist_ok=True)
-    url = f"{CONFIG.poster_base_url}/?poster={date}&kind=album"
-    paths: list[str] = []
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(channel="chrome")
-            try:
-                # 视口宽 ≥ 1080(卡片宽);高 1600 留足单卡渲染(卡片 1440 高)
-                page = browser.new_page(
-                    viewport={"width": 1200, "height": 1600}, device_scale_factor=2
-                )
-                page.goto(url, timeout=CONFIG.poster_timeout_ms)
-                page.wait_for_selector(_READY, timeout=CONFIG.poster_timeout_ms)
-                cards = page.locator('[data-poster-card]')
-                n = cards.count()
-                if n == 0:
-                    log.error("图集未找到卡片(data-poster-card):%s", url)
-                    return []
-                for i in range(n):
-                    out = out_d / f"图集_{date}_{i + 1}.png"
-                    cards.nth(i).screenshot(path=str(out))
-                    paths.append(str(out))
-            finally:
-                browser.close()
-    except Exception as e:  # noqa: BLE001
-        log.error("图集出图失败(%s): %s", url, e)
-        return []
-
-    log.info("图集已生成 %d 张: %s", len(paths), paths)
-    return paths
 
 
 def render_and_push(date: str, kind: str = "review") -> dict:

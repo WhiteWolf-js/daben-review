@@ -38,6 +38,7 @@ export default function ReportSummary({
   onGenerate: () => void;
 }) {
   const [posterOpen, setPosterOpen] = useState(false);
+  const [posterReady, setPosterReady] = useState(false);
   // 截 PosterView 的 DOM 成 PNG(排版与后端 Playwright 出图共用同一组件)
   const { ref: posterRef, exporting, download: downloadPoster } = usePosterExport(`复盘_${date}.png`);
 
@@ -104,16 +105,25 @@ export default function ReportSummary({
       <Dialog open={posterOpen} onClose={() => setPosterOpen(false)} maxWidth={false}>
         <DialogContent sx={{ p: 2, bgcolor: "#010409", overflow: "auto" }}>
           <Box ref={posterRef} sx={{ width: POSTER_WIDTH }}>
-            <PosterView date={date} />
+            <PosterView date={date} onReady={setPosterReady} />
           </Box>
         </DialogContent>
         <DialogActions>
+          {/* 没就绪不让下载:海报各 section 是「哪个接口先回来先画哪个」,提前截图会出一张
+              缺「今日方向 / 明日候选」的残图,而且看不出少了东西(踩过) */}
+          {!posterReady && (
+            <Typography variant="caption" color="text.secondary" sx={{ mr: "auto", ml: 1 }}>
+              数据加载中,完整后可下载…
+            </Typography>
+          )}
           <Button onClick={() => setPosterOpen(false)}>关闭</Button>
           <Button
             variant="contained"
             onClick={downloadPoster}
-            disabled={exporting}
-            startIcon={exporting ? <CircularProgress size={14} color="inherit" /> : <ImageIcon />}
+            disabled={exporting || !posterReady}
+            startIcon={
+              exporting || !posterReady ? <CircularProgress size={14} color="inherit" /> : <ImageIcon />
+            }
           >
             下载 PNG
           </Button>

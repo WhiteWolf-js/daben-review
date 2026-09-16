@@ -54,13 +54,17 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * 数据全部复用现有 API,不新增后端接口。全部请求 settle 后在根节点打
  * data-poster-ready="1",供后端 Playwright 等待渲染就绪(失败也置位,避免无限等待)。
  */
-export default function PosterView({ date }: { date: string }) {
+export default function PosterView({ date, onReady }: { date: string; onReady?: (ready: boolean) => void }) {
   const [emotion, setEmotion] = useState<Emotion | null>(null);
   const [cands, setCands] = useState<Candidate[]>([]);
   const [themes, setThemes] = useState<ThemeRow[]>([]);
   const [conflict, setConflict] = useState("");
   const [boards, setBoards] = useState<Record<string, number>>({});
   const [ready, setReady] = useState(false);
+
+  // 就绪状态同时给两个消费者:后端 Playwright 看 data-poster-ready,前端弹窗看 onReady
+  // (导出按钮要等它 —— 各 section 是 settle 一个画一个,没就绪就截图会漏掉慢的那块)
+  useEffect(() => onReady?.(ready), [ready, onReady]);
 
   useEffect(() => {
     if (!date) return;
