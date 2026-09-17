@@ -14,11 +14,13 @@ import ReportPoster from "./components/ReportPoster";
 
 // ?poster=YYYYMMDD 直接渲染纯海报页(供手动分享与后端 Playwright 截图),不引路由库
 // 追加 &kind=auction 渲染盘前竞价海报(&brief= 传 agent 盘前解读)、&kind=ladder 渲染连板天梯、
-// &kind=holding 渲染持仓处置速览、&kind=report 渲染完整复盘长图(整篇正文)
+// &kind=holding 渲染持仓处置速览、&kind=report 渲染完整复盘正文
+// (&part=1|2 只出该张 —— 整篇太细长,飞书气泡里会压糊,推送走分张)
 const _q = new URLSearchParams(window.location.search);
 const posterDate = _q.get("poster");
 const posterKind = _q.get("kind");
 const posterBrief = _q.get("brief") ?? "";
+const posterPart = Number(_q.get("part")) || 0;
 
 // MUI X pro license(供 mui-x 组件使用)。**必须走环境变量,绝不能硬编码** ——
 // 授权码是商业凭证,写进代码会随仓库公开出去。配在 `.env.local`(见 .env.example)。
@@ -38,7 +40,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           ) : posterKind === "holding" ? (
             <HoldingPoster date={posterDate} />
           ) : posterKind === "report" ? (
-            <ReportPoster date={posterDate} />
+            <ReportPoster date={posterDate} part={posterPart} />
           ) : (
             <PosterView date={posterDate} />
           )

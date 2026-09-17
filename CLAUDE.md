@@ -72,8 +72,8 @@ cd ~/daban-review/frontend && npm run dev                     # :5173
 backend/daban_review/
   config.py            DB 路径 / akshare 降频 / Claude 网关 / usd_cny
   cli.py               review | emotion | ladder | fetch | analyze | backtest
-  data/                akshare_client.py(涨停池=akshare push2ex,分时/日线/指数=东财 push2his
-                       主用 + mootdx 兜底,涨停原因+涨停板块榜=同花顺 dataapi)
+  data/                akshare_client.py(涨停池=akshare push2ex,分时/日线/指数=腾讯 gtimg 主用
+                       + 东财/mootdx 兜底,涨停原因+涨停板块榜=同花顺 dataapi)
                        store.py(SQLite WAL / live / usage) / fetch.py(拉取+列名归一+落库)
   metrics/             纯本地计算,不限频:emotion 情绪温度晋级率 / ladder 天梯+封单强度
                        sector 板块热度 / auction 竞价高开 / auction_live 盘前竞价决策台
@@ -120,7 +120,18 @@ data/                  SQLite 库 + posters/ + logs/
 - **改 prompt 或候选池后必须同日复跑 ≥2 次比对**:`python3 tools/cmp_reviews.py /tmp/r1.txt /tmp/r2.txt`
   (抽自检行/周期结论/方向/画像票/矛盾主角/候选做 diff,六项应全 ✅)。别只看候选,正文漂移是独立问题。
 - **分时是 L1,不需要 L2**;可编程 L2 个人拿不到(通达信 L2 仅客户端可看无 API)。
-- **K线(日线/分时/指数)主源是东财 `push2his`,mootdx 只剩兜底** —— 2026-09-11 起公开通达信
+- **K线(日线/分时/指数)主源是腾讯 gtimg,东财 push2his 与 mootdx 依次兜底**。
+  腾讯两个坑,都已实测确认、别再踩:
+  ① **日线不带成交额**(6 元素:日期/开/收/高/低/量),`amount` 恒 0。**不要用「量×100×收盘价」
+  凑一个近似值填进去** —— 这是要展示给人的数字,假的比没有更糟;`auction_metrics.amount_yi`
+  在缺失时给 `None`、前端显示「—」。唯一消费者就是它(service.py 里那个 amount 取自涨停池)。
+  ② **m1 封顶 320 根**(约 1.3 个交易日),`param` 里写再大也只回这些 → **历史日分时拿不到**,
+  当天(和昨天一部分)才有。盘中监控与当日复盘够用;翻旧日期的分时弹窗会是空的。
+  分钟线端点是 `ifzq.gtimg.cn`,**带 `web.` 前缀会 301**;日线端点则要 `web.ifzq.gtimg.cn`。
+- 东财 `push2his` 降为兜底 —— 2026-09-16 排查时密集打了十几次被限频,**隔夜仍不通**
+  (curl 与 Python 同样 `000`),不是触发式限频而是长期不可达。涨停池走的 push2**ex**
+  是另一台主机,一直正常,别混为一谈。
+- mootdx 只剩最后一层兜底 —— 2026-09-11 起公开通达信
   服务器对数据类接口一律**空返**:请求 5 根日线只回 2 字节(头部声称 800 根、一根数据都没有),
   14 台可达服务器行为完全一致,而 `get_security_count` 这类元数据接口仍正常。mootdx 0.11.7 /
   tdxpy 0.2.7 都已是 PyPI 最新且期间没升级过 → 是服务端不供数,**换 pytdx 等客户端没用**。
@@ -178,10 +189,15 @@ data/                  SQLite 库 + posters/ + logs/
   改一处就好。海报侧没有 tooltip 兜底 —— 面板上截断后能 hover 看全的字段(如持仓触发价),
   海报上必须给够行数,否则信息永久丢失。
 - **五种海报 kind**(`poster.py:_KIND_NAME`):`review` 摘要海报 / `auction` 盘前竞价 /
-  `ladder` 连板天梯 / `holding` 持仓处置 / `report` **完整复盘长图**(整篇正文,机器人「复盘长图」)。
-  长图是唯一**高度不定**的一种,`_KIND_SCALE` 把它的 `device_scale_factor` 降到 1.5 ——
-  2 倍会到几十 MB 超飞书图片上限(前端 `usePosterExport` 的长图导出同口径)。
-  实测 20260916 一篇 = 1620×4365px / 1.4MB,离 Chrome 截图高度上限与飞书 10MB 都还很远。
+  `ladder` 连板天梯 / `holding` 持仓处置 / `report` **完整复盘正文**(机器人「复盘长图」)。
+- **复盘正文必须拆张推,推的是宽高比不是分辨率**:整篇正文渲染出来是 **1:2.7** 的细长图,
+  飞书聊天气泡按**高度**把图压进去,宽度只剩 **21%** —— 等于把 2160 宽缩到 450 宽显示,字全糊。
+  提分辨率完全无用(只影响点开大图后)。对照:摘要海报 1:1.23、天梯 1:0.6,都不糊。
+  解法是 `render_report_parts()` 按段拆 **2 张**(切点 `utils/report.ts:PART1_SECTIONS=3`,
+  语义上正好是「今日发生了什么 / 明日怎么打」),实测 1:1.52 与 1:1.29,与摘要海报同档。
+  **切点按位置不按段号**(段号解析不出时整段会丢);**别按字数配平** —— 画像段字多但是紧凑卡片,
+  候选段字少却每只票占 4-5 行。数据基础/自检行只跟第 1 张,脚注只跟最后一张。
+  `render_and_push(kind="report")` 已自动改走分张,别再用 `render_poster` 单出整篇去推。
 - ECharts 在 MUI Dialog 里用**原生 echarts** 手动 `init/setOption/resize`,`echarts-for-react` 会 stale 只画左半。
 - 通达信协议偶发浮点垃圾(`5.87e-39`),量能一律 `<1e-6` 归零。
 - 前端 MUI v7 + emotion,样式用 `sx`,不新增 `.scss`。

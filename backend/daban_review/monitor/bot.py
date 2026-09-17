@@ -51,13 +51,24 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
     try:
         # 竞价图不带 agent 解读(with_brief 会调 agent 烧钱);已落库的解读走「竞价」文本指令看
         kind = which if which in ("auction", "ladder", "holding", "report") else "review"
-        path = poster.render_poster(date, kind=kind)
-        if path:
-            if send_lark_image(path, target=chat_id):
+        # 复盘正文拆张推:整篇 1:2.7 的细长图在飞书气泡里会被压糊(见 poster.REPORT_PARTS)
+        if kind == "report":
+            paths = poster.render_report_parts(date)
+        else:
+            paths = [p] if (p := poster.render_poster(date, kind=kind)) else []
+
+        if paths:
+            ok = [send_lark_image(x, target=chat_id) for x in paths]
+            if all(ok):
                 return
             # 图推不出去也别让用户空手 —— 最常见原因是应用缺 im:resource:upload 权限
             # (发文字的权限和发图的是两套,文字通不代表图能通)。有文本版的就退回文本。
-            log.warning("图片推送失败,退回文本: %s", path)
+            log.warning("图片推送失败(%d/%d 成功): %s", sum(ok), len(ok), paths)
+            if any(ok):  # 部分成功:别把已发过的内容再用文本重发一遍,只说哪张缺了
+                missing = [str(i + 1) for i, s in enumerate(ok) if not s]
+                send_lark(f"第 {'、'.join(missing)} 张没推成(共 {len(ok)} 张),再发一次指令试试。",
+                          target=chat_id)
+                return
             fb = {
                 "holding": bc.fmt_holdings,
                 "ladder": lambda: bc.fmt_ladder(date),
@@ -66,7 +77,7 @@ def _run_render(date: str, chat_id: str, which: str = "review") -> None:
             send_lark(
                 f"{fb()}\n\n(图没推成:应用可能缺 im:resource:upload 权限,已退回文本)"
                 if fb
-                else f"{date} 图出好了但推送失败(应用可能缺 im:resource:upload 权限)。图在:{path}",
+                else f"{date} 图出好了但推送失败(应用可能缺 im:resource:upload 权限)。图在:{paths[0]}",
                 target=chat_id,
             )
             return
@@ -122,7 +133,10 @@ def dispatch(text: str, chat_id: str) -> None:
     if kind == "text":
         send_lark(act["content"], target=chat_id)
     elif kind == "image":
-        send_lark("🖼 正在出图,约 10 秒…", target=chat_id)
+        # 正文拆两张,耗时约翻倍 —— 回执写实数,免得以为卡住了又连发一条
+        tip = ("🖼 正在出图(复盘正文分 2 张),约 20 秒…" if act.get("which") == "report"
+               else "🖼 正在出图,约 10 秒…")
+        send_lark(tip, target=chat_id)
         threading.Thread(
             target=_run_render, args=(act["date"], chat_id, act.get("which", "review")),
             daemon=True, name="bot-render",

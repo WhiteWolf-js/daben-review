@@ -1,10 +1,15 @@
-"""东财 push2his K线源(替代 mootdx)的解析与降级测试。全部打桩,不联网。
+"""K线数据源(腾讯主用 → 东财兜底 → mootdx 兜底)的解析与降级测试。全部打桩,不联网。
 
-背景:2026-09-11 起公开通达信服务器对数据类接口一律空返(请求 5 根日线只回 2 字节,
-头部声称 800 根却没有数据),14 台可达服务器行为一致 —— 服务端不再供数,换客户端无用。
-于是 K线主源改东财 `push2his`,mootdx 退为兜底。
+背景两段:
+- 2026-09-11 公开通达信服务器对数据类接口一律空返(请求 5 根日线只回 2 字节,头部声称
+  800 根却没有数据),14 台可达服务器行为一致 → mootdx 退为兜底,主源改东财 `push2his`。
+- 2026-09-17 东财 push2his 被打到限频后**隔夜仍不通**(curl 与 Python 同样 000),
+  遂改用腾讯 gtimg 作主源,东财降为兜底。
 
-夹具是真实抓到的响应片段(fields2=f51..f57 → 时间,开,收,高,低,量,额)。
+夹具都是真实抓到的响应片段:
+- 东财 fields2=f51..f57 → 时间,开,收,高,低,量,额
+- 腾讯日线 6 元素 → 日期,开,收,高,低,量(**无成交额**)
+- 腾讯 m1 8 元素 → YYYYMMDDHHMM,开,收,高,低,量,{},?
 """
 
 from __future__ import annotations
@@ -29,8 +34,13 @@ MIN_KLINES = [
 
 @pytest.fixture
 def em(monkeypatch):
-    """打桩 _em_klines,记录被请求的 (secid, klt, limit)。"""
+    """打桩 _em_klines,记录被请求的 (secid, klt, limit)。
+
+    **同时把腾讯打空** —— 2026-09-17 起腾讯是主源,不关掉的话这些用例会先打真实网络、
+    根本走不到东财分支(本类测的就是东财这层兜底)。
+    """
     calls = []
+    monkeypatch.setattr(ak, "_tx_fetch", lambda *a, **k: [])
 
     def _set(klines):
         def fake(secid, klt, limit):
@@ -144,3 +154,87 @@ class TestIndexIntradayMin:
         with pytest.raises(Exception):
             ak.index_intraday_min("880888", "20260916")
         assert calls == []                      # 压根没请求东财
+
+
+# ---- 腾讯源(2026-09-17 起的主源)----
+
+TX_DAY = [
+    ["2026-09-15", "8.39", "8.38", "8.40", "8.25", "219767"],
+    ["2026-09-16", "9.10", "9.55", "9.55", "9.05", "310000"],
+]
+TX_M1 = [
+    ["202609170931", "9.10", "9.15", "9.16", "9.09", "1200.00", {}, "5.94"],
+    ["202609170932", "9.15", "9.20", "9.21", "9.14", "900.00", {}, "4.10"],
+    ["202609160931", "8.80", "8.81", "8.82", "8.79", "500.00", {}, "2.00"],  # 前一日,应过滤
+]
+
+
+@pytest.fixture
+def tx(monkeypatch):
+    """打桩 _tx_fetch,记录 (url, param, symbol, key)。"""
+    calls = []
+
+    def _set(rows):
+        def fake(url, param, symbol, key):
+            calls.append((url, param, symbol, key))
+            return rows
+        monkeypatch.setattr(ak, "_tx_fetch", fake)
+        return calls
+    return _set
+
+
+class TestTencentSymbol:
+    @pytest.mark.parametrize("code,want", [
+        ("002584", "sz002584"), ("300750", "sz300750"),
+        ("605058", "sh605058"), ("688981", "sh688981"),
+    ])
+    def test_prefix(self, code, want):
+        assert ak._tx_symbol(code) == want
+
+    def test_index_symbol_is_explicit(self):
+        assert ak._TX_INDEX_SYMBOL["999999"] == "sh000001"
+        assert ak._TX_INDEX_SYMBOL["399006"] == "sz399006"
+
+
+class TestTencentPrimary:
+    def test_daily_bars_prefers_tencent(self, tx, monkeypatch):
+        calls = tx(TX_DAY)
+        monkeypatch.setattr(ak, "_em_klines", lambda *a, **k: pytest.fail("不该走到东财"))
+        d = ak.daily_bars("002584", 2)
+        assert list(d.columns) == ["date", "open", "close", "high", "low", "vol", "amount"]
+        assert d.iloc[0]["date"] == "20260915" and d.iloc[1]["close"] == 9.55
+        assert calls[0][1] == "sz002584,day,,,2,"        # 末尾空 = 不复权
+
+    def test_daily_amount_is_zero_not_faked(self, tx):
+        """腾讯不给成交额 → 恒 0。绝不能用「量×价」凑近似值冒充。"""
+        tx(TX_DAY)
+        assert (ak.daily_bars("002584", 2)["amount"] == 0).all()
+
+    def test_intraday_filters_day_and_caps_at_320(self, tx):
+        calls = tx(TX_M1)
+        d = ak.stock_intraday_min("002584", "20260917")
+        assert list(d["time"]) == ["09:31", "09:32"]     # 09-16 那根被过滤
+        assert d.iloc[0]["close"] == 9.15
+        assert calls[0][1].endswith(",m1,,320")          # 请求再多也只回 320,别写更大的数
+
+    def test_index_maps_to_tencent_symbol(self, tx):
+        calls = tx(TX_M1)
+        d = ak.index_intraday_min("999999", "20260917")
+        assert calls[0][2] == "sh000001"
+        assert list(d.columns) == ["time", "close", "high", "low", "vol", "amount"]
+        assert (d["amount"] == 0).all()                  # 指数分时同样无成交额
+
+    def test_falls_through_to_eastmoney_when_tencent_empty(self, tx, monkeypatch):
+        tx([])
+        monkeypatch.setattr(ak, "_em_klines", lambda *a, **k: DAILY_KLINES)
+        d = ak.daily_bars("002584", 3)
+        assert len(d) == 3 and d.iloc[0]["date"] == "20260901"
+
+
+class TestAuctionAmountDegrades:
+    def test_amount_yi_is_none_when_source_has_no_amount(self, tx):
+        """成交额缺失时给 None(前端「—」),不是 0.0 —— 0 会被当成真实读数。"""
+        tx(TX_DAY)
+        m = ak.auction_metrics("002584", "20260916")
+        assert m is not None and m["amount_yi"] is None
+        assert m["gap_pct"] == pytest.approx((9.10 - 8.38) / 8.38 * 100, abs=0.01)

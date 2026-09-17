@@ -280,7 +280,78 @@ def realtime_quotes(codes: list[str]) -> dict[str, dict]:
     return out
 
 
-# ---- K线数据源:东财 push2his 主用,mootdx 兜底 ----
+# ---- K线数据源:腾讯主用 → 东财兜底 → mootdx 兜底 ----
+#
+# 2026-09-17 加腾讯:东财 push2his 被打到限频后**隔夜仍不通**(curl 与 Python 同样 000),
+# 不是触发式限频而是长期不可达;mootdx 更早就废了(见下)。腾讯 gtimg 实测通、免 key、
+# 日线/1分钟/指数齐全,故升为主源,另两个留作兜底(哪天活过来自动接上)。
+#
+# 腾讯的两个坑:
+# - **日线不带成交额**(6 元素:日期/开/收/高/低/量),`amount` 只能给 0。不要用
+#   「量×100×收盘价」凑一个出来 —— 那是编数据;让 `auction_metrics` 缺失时给 None、
+#   前端显示「—」才是诚实的。唯一消费者就是它(service.py 那个 amount 取自涨停池,不受影响)。
+# - **m1 封顶 320 根**(约 1.3 个交易日),请求再多也只给这些。所以**历史日分时拿不到**,
+#   只有当天(和昨天一部分)可用。盘中监控/当日复盘够用;翻旧日期的分时弹窗会是空的。
+_TX_DAY_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+_TX_MIN_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"  # 注意没有 web. 前缀,带上会 301
+# 指数用固定映射,理由同东财:000001 既是上证指数也是平安银行
+_TX_INDEX_SYMBOL = {"999999": "sh000001", "399006": "sz399006"}
+
+
+def _tx_symbol(code: str) -> str:
+    """个股代码 → 腾讯 symbol(`sh`/`sz` + 代码)。6 开头为沪市(含 60/68),其余深市。"""
+    c = str(code).zfill(6)
+    return f"{'sh' if c.startswith('6') else 'sz'}{c}"
+
+
+def _tx_fetch(url: str, param: str, symbol: str, key: str) -> list:
+    """拉腾讯 K线,返回 `data[symbol][key]` 这层数组;失败或无数据返回 []。"""
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
+    try:
+        data = requests.get(url, params={"param": param}, headers=headers, timeout=10).json()
+    except Exception as e:  # noqa: BLE001 单只失败不该炸掉整批扫描
+        log.warning("腾讯K线失败(%s): %s", param, e)
+        return []
+    finally:
+        time.sleep(CONFIG.ak_throttle)
+    node = ((data or {}).get("data") or {}).get(symbol) or {}
+    return node.get(key) or []
+
+
+def _tx_day(code: str, n: int) -> pd.DataFrame:
+    """腾讯日线 → 列 date/open/close/high/low/vol/amount(amount 恒 0,源不提供)。"""
+    sym = _tx_symbol(code)
+    rows = _tx_fetch(_TX_DAY_URL, f"{sym},day,,,{n},", sym, "day")  # 末尾空 = 不复权
+    rows = [r for r in rows if len(r) >= 6]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame([r[:6] for r in rows],
+                      columns=["date", "open", "close", "high", "low", "vol"])
+    df["date"] = df["date"].astype(str).str.replace("-", "", regex=False)
+    for c in ("open", "close", "high", "low", "vol"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["amount"] = 0.0
+    return df
+
+
+def _tx_min(symbol: str, date: str) -> pd.DataFrame:
+    """腾讯 1 分钟线 → 列 time/open/close/high/low/vol,已按 date 过滤;拿不到返回空表。
+
+    元素是 `[YYYYMMDDHHMM, 开, 收, 高, 低, 量(手), {}, ?]`,只取前 6 个。
+    """
+    rows = _tx_fetch(_TX_MIN_URL, f"{symbol},m1,,320", symbol, "m1")  # 320 是上限,给大了也只回这么多
+    rows = [r for r in rows if len(r) >= 6 and str(r[0])[:8] == date]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame([r[:6] for r in rows],
+                      columns=["dt", "open", "close", "high", "low", "vol"])
+    for c in ("open", "close", "high", "low", "vol"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["time"] = df["dt"].astype(str).str[8:10] + ":" + df["dt"].astype(str).str[10:12]
+    return df
+
+
+# ---- 东财 push2his(兜底之一)----
 #
 # **为什么从 mootdx 换到东财**:2026-09-11 起公开通达信服务器对数据类接口一律空返 ——
 # 实测请求 5 根日线只回 2 字节(头部声称 800 根、一根数据都没有),14 台可达服务器行为完全一致,
@@ -338,12 +409,17 @@ def _em_frame(klines: list[str]) -> pd.DataFrame:
 
 
 def stock_intraday_min(code: str, date: str) -> pd.DataFrame:
-    """个股当日 1 分钟线(东财 push2his 主用,mootdx 兜底)。
+    """个股 1 分钟线(腾讯主用 → 东财 → mootdx)。
 
     返回统一列 time/open/close/high/low/vol;取不到返回空表。
     用于判断一字/带量翘板/炸板节点。
+    注意腾讯只回最近 320 根,**历史日基本拿不到**(见文件上方数据源说明)。
     """
     import datetime as _dt
+
+    tx = _tx_min(_tx_symbol(code), date)
+    if not tx.empty:
+        return tx[["time", "open", "close", "high", "low", "vol"]].reset_index(drop=True)
 
     d = _dt.datetime.strptime(date, "%Y%m%d").date()
     gap = max((_dt.date.today() - d).days, 0)
@@ -401,11 +477,16 @@ def _mootdx_intraday_min(code: str, date: str) -> pd.DataFrame:
 
 
 def daily_bars(code: str, n: int = 8) -> pd.DataFrame:
-    """日线近 n 根(东财主用,mootdx 兜底),统一列 date/open/close/high/low/vol/amount。
+    """日线近 n 根(腾讯主用 → 东财 → mootdx),统一列 date/open/close/high/low/vol/amount。
 
     供K线形态与量价感知。取不到返回空表 —— 调用方(kline/abnormal/pattern_blacklist)
     都按「空表=这只跳过」处理,不要改成抛异常,否则一只拉不到会废掉整批扫描。
+    走腾讯时 **amount 恒为 0**(源不提供),别拿它算成交额,见文件上方数据源说明。
     """
+    tx = _tx_day(code, n)
+    if not tx.empty:
+        return tx[["date", "open", "close", "high", "low", "vol", "amount"]].reset_index(drop=True)
+
     df = _em_frame(_em_klines(_em_secid(code), klt=101, limit=n))
     if not df.empty:
         return pd.DataFrame({
@@ -443,12 +524,25 @@ def index_intraday_min(code: str, date: str) -> pd.DataFrame:
     """指数当日 1 分钟线(东财主用,mootdx 兜底)。code:上证=999999 / 创业板指=399006。
 
     返回统一列 time/close/high/low/vol/amount;取不到返回空表。
-    供盘中「指数急杀」判据:近 N 分钟跌幅 + 当日 VWAP 均价(amount/vol)。
+    供盘中「指数急杀」判据 —— 只用点位跌幅,不掺 VWAP(见 `signals.py` 里的说明),
+    所以 amount 缺失(腾讯源)不影响判据。
 
     code 用的是**通达信**指数代码,东财那边要换成 secid(见 `_EM_INDEX_SECID`)——
     不能按个股规则从代码前缀推市场,000001 既是上证指数又是平安银行。
     """
     import datetime as _dt
+
+    tx_sym = _TX_INDEX_SYMBOL.get(str(code))
+    if tx_sym:
+        tx = _tx_min(tx_sym, date)
+        if not tx.empty:
+            # 指数分时同样没有成交额 → amount 给 0。VWAP(amount/vol)因此算不出来,
+            # signals 那边用「近 N 分钟跌幅」这一路判据,不依赖 VWAP。
+            return pd.DataFrame({
+                "time": tx["time"].values, "close": tx["close"].values,
+                "high": tx["high"].values, "low": tx["low"].values,
+                "vol": tx["vol"].fillna(0).values, "amount": 0.0,
+            })
 
     secid = _EM_INDEX_SECID.get(str(code))
     if secid:
@@ -519,7 +613,9 @@ def auction_metrics(code: str, date: str) -> dict | None:
         "open": round(open_p, 2),
         "prev_close": round(prev_close, 2),
         "gap_pct": round((open_p - prev_close) / prev_close * 100, 2),
-        "amount_yi": round(float(d.iloc[i]["amount"]) / 1e8, 2),
+        # 腾讯日线不提供成交额(amount 恒 0)→ 给 None,前端显示「—」。
+        # 别用「量×价」凑一个近似值填进来:这是要展示给人看的数字,假的比没有更糟。
+        "amount_yi": round(_amt / 1e8, 2) if (_amt := float(d.iloc[i]["amount"])) > 0 else None,
     }
 
 
